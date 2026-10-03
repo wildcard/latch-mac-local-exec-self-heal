@@ -6,6 +6,18 @@ It does not need a cloud shell. Once the desktop link is gone, a remote agent ca
 
 **Version:** see `VERSION` (current **1.3.0**).
 
+## 1.3.0 shipped vs 1.4.0 proposed
+
+| | **1.3.0 (this tree, `VERSION`)** | **1.4.0 (proposal only)** |
+|---|---|---|
+| Status | Shipped. LaunchAgent, tests, install. | Docs under [`docs/1.4.0/`](docs/1.4.0/). No script, plist, Worker, or version bump. |
+| What it heals | Dead process, stale heartbeat, bad `bootOutcome`, frozen `heartbeatAtMs`, on-Mac `.request` file. | Same, **plus** the classes 1.3.0 cannot see — especially S-NEW-D. |
+| S-NEW-D | **Not auto-healed.** Moving heartbeat under 180s stays `ok` / `local_healthy`. `cloudConnectObservable` is always `false`. Long ok streak sets `escalateHint` only. | Must identify the class and relaunch (quit + `open -ga "Grok Bot"`), or accept a heal-only beacon that does that. **Not implemented. Not proven.** |
+| How S-NEW-D would be seen | It cannot. | Prefer a native connection file written by Grok Bot so a bot does not have to declare the Mac down. 2026-10-02 dig found no such file. Last resort: personal Cloudflare Worker, heal-request only, Mac outbound poll. Beacon would bypass the 300s cooldown. See [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md). |
+
+Checklist: [`docs/TASKS-1.4.0.md`](docs/TASKS-1.4.0.md).
+
+
 ## What it heals
 
 | Signal on the Mac | Action |
@@ -25,7 +37,7 @@ Success (`status=healed`, `readiness=ready`) requires the process to be up **and
 - **S-NEW-D / silent disconnect:** `ListMachines.connected=false` in the cloud while this Mac still shows a live process and a **moving** heartbeat. The LaunchAgent cannot see cloud connect state (`cloudConnectObservable` is always false). A moving heartbeat under the stale threshold is treated as healthy on purpose — the 2026-10-02 incident was this case (heartbeat age about 31–45s, heal never fired).
 - Waking the display or repairing WAN.
 
-If `last.json` stays `status=ok` / `readiness=local_healthy` while the cloud link is down, restart Grok Bot yourself. After `OK_HINT_SEC` (default 300s) of continuous local health, `escalateHint` names S-NEW-D so morning triage is not an empty “healthy” with no caveat. A future fix needs a cloud-side signal; this kit will not claim that.
+If `last.json` stays `status=ok` / `readiness=local_healthy` while the cloud link is down, restart Grok Bot yourself. After `OK_HINT_SEC` (default 300s) of continuous local health, `escalateHint` names S-NEW-D so morning triage is not an empty “healthy” with no caveat. A future fix needs a signal this kit does not have; **1.3.0 will not claim it**. The 1.4.0 section above is a proposal, not this LaunchAgent.
 
 Someone **at the Mac** (or any path that can still write files there) can force one relaunch:
 

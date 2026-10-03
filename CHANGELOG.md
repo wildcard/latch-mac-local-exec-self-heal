@@ -1,5 +1,15 @@
 # Latch mac-local-exec-self-heal
 
+## Unreleased — 1.4.0 (proposed, not shipped)
+
+Docs only. **`VERSION` remains 1.3.0.** S-NEW-D is **not** auto-healed by the LaunchAgent in this tree.
+
+- Proposal and research under `docs/1.4.0/` (beacon spec, Mac exposure dig, 1.3.0 prove record, pre-1.3 gap spec).
+- Product bar (`docs/PRODUCT-BAR.md`): catch every `ListMachines.connected=false` class, including S-NEW-D; the only fix is restarting Grok Bot; Worker heal-only inbox is last resort; prefer a native Mac connection file so bots need not declare the machine down.
+- Decision locks recorded, not built: Worker inbox is the default beacon transport; a beacon heal-request bypasses the 300s cooldown the same way the local `.request` file does.
+- Research fold-in: no on-disk or localhost signal mirrored `ListMachines.connected` on 2026-10-02. Named `local-exec-*-connection` files were source strings only. Do not lower stale or frozen thresholds to fake a fix.
+- Not in this change: Cloudflare Worker, Wrangler config, Mac poll client, plist, heal script, tests, or a version bump. No secrets.
+
 ## 1.3.0 — 2026-10-02
 - Readiness gate: after `open -ga`, `healed` is written only when the process is up and (heartbeat age is finite and under `HEARTBEAT_STALE_SEC`, or `bootOutcome=ready`). Bounded wait `READINESS_WAIT_SEC` (default 75). Otherwise `heal_incomplete` or `heal_failed` with `readiness` and `escalateHint`.
 - `heartbeat_frozen`: same pid and same `heartbeatAtMs` for at least `STUCK_SEC` (default 120) → relaunch. Toggle with `HEAL_ON_STUCK_SESSION` (default 1). A heartbeat that is still advancing is not frozen.
