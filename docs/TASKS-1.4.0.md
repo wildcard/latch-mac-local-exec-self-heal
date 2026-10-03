@@ -4,11 +4,15 @@
 
 **S-NEW-D today:** not auto-healed. See [1.4.0/PROVE-1.3.0.md](1.4.0/PROVE-1.3.0.md) and [INCIDENT-2026-10-02.md](INCIDENT-2026-10-02.md).
 
-Bar: [PRODUCT-BAR.md](PRODUCT-BAR.md).
+Bar: [PRODUCT-BAR.md](PRODUCT-BAR.md). Modes matrix: [1.4.0/SELF-HEAL-MODES.md](1.4.0/SELF-HEAL-MODES.md).
+
+**Modes pack (2026-10-02 ~11:35 PM PT).** Deploy-time choice: none, mac-local (1.3.0), worker-beacon (1.4.0 proposed), vitals-buddy (proposed). Modes may pack together. worker-beacon stays the low-token S-NEW-D path when a bot can POST a heal-request. vitals-buddy is the hermetic audit path (paired bot checks `ListMachines.connected` and writes a pullable health log; stale/missing → resume buddy or restart Grok Bot; more tokens; optional future Latch-hosted relay). Docs only here — do not build Worker or buddy in this change.
 
 ## Checklist
 
 - [x] **Repo docs.** This change. Proposal, research, product bar, task list, README pointer, unreleased CHANGELOG stub. No kit code.
+- [x] **Self-heal modes matrix** (2026-10-02 ~11:35 PM PT). [1.4.0/SELF-HEAL-MODES.md](1.4.0/SELF-HEAL-MODES.md): none / mac-local / worker-beacon / vitals-buddy; deploy-time multi-mode pack. Docs only.
+- [ ] **vitals-buddy (proposed).** Paired audit bot + pullable health log for the Mac kit. Not designed or built in this repo yet. Optional Latch-hosted relay is future.
 - [ ] **Personal Cloudflare Worker (heal-only inbox).** Operator account, Wrangler signed in with the personal Gmail Cloudflare login. Not this repository. Accept only `{v, action: "heal_request", machineId, jti, exp}`. Reject every other action. Single-use `jti`, short `exp` (≤120s), one pending flag per machine, rate limit. **No secrets in git.**
 - [ ] **Mac poll client.** One HTTPS GET per existing 60s LaunchAgent tick. Valid pending flag → same quit + `open -ga "Grok Bot"` as `operator_request`, then the 1.3.0 readiness gate. New `last.json` reason distinct from keyboard `operator_request`. Disable file still wins. Beacon **bypasses** the 300s cooldown (locked 2026-10-02 ~11:07 PM PT). Do not upload logs on this channel.
 - [ ] **Prove S-NEW-D via beacon.** Plan C then D in [1.4.0/SPEC-1.4.0-beacon.md](1.4.0/SPEC-1.4.0-beacon.md). From the box, POST one valid heal-request **without** using a live Mac shell to touch the `.request` file. Pass: pid changes and `last.json` shows the beacon reason, then `healed`/`ready` or an honest `heal_incomplete`. Replay, expired `exp`, and bad schema must not relaunch. Disable file must block. Do not edit `last.json` by hand. Do not call a process kill S-NEW-D (that is S1, already in 1.3.0).
@@ -35,4 +39,5 @@ When that inbox is built, use the operator's **personal Cloudflare** account and
 
 - Sleep, lid closed, WAN, VPN, or sign-in repair. Relaunch is the only fix. If `connected` stays false after one relaunch, escalate. Do not loop.
 - A general remote shell or log upload on the beacon.
-- Shipping 1.4.0 by editing `VERSION` before the Worker or the native file exists.
+- Implementing vitals-buddy, a Latch-hosted relay, or a multi-mode installer UI in this docs change.
+- Shipping 1.4.0 by editing `VERSION` before the Worker, vitals-buddy pack, or the native file exists.

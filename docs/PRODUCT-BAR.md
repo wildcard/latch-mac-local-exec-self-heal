@@ -1,6 +1,6 @@
 # Product bar — Mac local-exec self-heal
 
-**Set:** 2026-10-02 ~11:01 PM PT, with transport locks ~11:04 and ~11:07 PM PT  
+**Set:** 2026-10-02 ~11:01 PM PT; transport locks ~11:04 and ~11:07 PM PT; modes pack ~11:35 PM PT  
 **Applies to:** proposed **1.4.0**. The shipped kit is **1.3.0** and does not meet this bar yet.
 
 ## Bars
@@ -18,6 +18,17 @@ When that inbox is built, it uses the operator's **personal Cloudflare** account
 
 4. **Prefer a native Mac signal so bots do not have to declare the machine down.**  
    The 2026-10-02 dig found no such file. The ask is for Grok Bot to write connection state locally (working name `local-exec-daemon-connection.json`: `connected`, `lastSseAtMs`, `reason`) when the daemon’s SSE session connects, drops, or stalls. If that signal is proven against a real `connected=false` window and a healthy-hour baseline, the LaunchAgent heals on it and `cloudConnectObservable` may become true **for that signal only**. Until then the flag stays `false`.
+
+## Modes pack (2026-10-02 ~11:35 PM PT)
+
+Latch offers a **deploy-time choice** of self-heal modes the user can pack together. Full matrix: [1.4.0/SELF-HEAL-MODES.md](1.4.0/SELF-HEAL-MODES.md).
+
+- **none** — no self-heal.
+- **mac-local** (shipped 1.3.0) — LaunchAgent process / heartbeat / boot / frozen / request file; no cloud; **misses S-NEW-D**.
+- **worker-beacon** (1.4.0 proposed) — personal Cloudflare Worker heal-only inbox; Mac outbound poll; cooldown bypass; needs remote CF; **low token cost** for bots that already see `connected=false`.
+- **vitals-buddy** (proposed) — paired audit bot with Latch that periodically checks vitals (`ListMachines.connected` + other live signals) and writes a pullable health log the Mac kit reads. Stale or missing vitals → prompt buddy resume or restart Grok Bot. **More token-intensive**, but hermetic: the bot under test need not self-report down. Optional future Latch-hosted relay for users who do not want their own Worker.
+
+Present the trade-offs; let the user pick mode(s). Do not implement Worker or buddy in this docs change.
 
 ## What 1.3.0 already meets
 

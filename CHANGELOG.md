@@ -9,6 +9,7 @@ Docs only. **`VERSION` remains 1.3.0.** S-NEW-D is **not** auto-healed by the La
 - Decision locks recorded, not built: Worker inbox is the default beacon transport; a beacon heal-request bypasses the 300s cooldown the same way the local `.request` file does.
 - Research fold-in: no on-disk or localhost signal mirrored `ListMachines.connected` on 2026-10-02. Named `local-exec-*-connection` files were source strings only. Do not lower stale or frozen thresholds to fake a fix.
 - Connection-signal research (`docs/1.4.0/RESEARCH-GROK-BOT-CONNECTION-20261002.md`): public docs and the 0.66.0 dig still show no LaunchAgent-usable mirror of `ListMachines.connected`. Do not scrape credential JSON or treat a missing daemon file as disconnected.
+- Self-heal modes matrix (`docs/1.4.0/SELF-HEAL-MODES.md`, ~11:35 PM PT bar): none / mac-local / worker-beacon / vitals-buddy; deploy-time multi-mode pack. Product bar and tasks updated. No Worker or buddy code.
 - Not in this change: Cloudflare Worker, Wrangler config, Mac poll client, plist, heal script, tests, or a version bump. No secrets.
 
 ## 1.3.0 — 2026-10-02
