@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.latch.grok-bot-local-exec-heal</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOME__/Library/Application Support/Latch/bin/grok-bot-local-exec-heal.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/GrokBotLocalExecHeal.launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/GrokBotLocalExecHeal.launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HEARTBEAT_STALE_SEC</key>
+    <string>180</string>
+    <key>COOLDOWN_SEC</key>
+    <string>300</string>
+    <key>HEAL_CURSOR</key>
+    <string>0</string>
+    <key>STUCK_SEC</key>
+    <string>120</string>
+    <key>READINESS_WAIT_SEC</key>
+    <string>75</string>
+    <key>OK_HINT_SEC</key>
+    <string>300</string>
+    <key>HEAL_ON_STUCK_SESSION</key>
+    <string>1</string>
+  </dict>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
