@@ -14,6 +14,8 @@
 3. **Worker heal-only inbox is last resort.**  
    Use it only for classes Mac-local signals cannot see. Outbound poll (no inbound port). Heal-request messages only. The operator locked this as the default transport (2026-10-02 ~11:04 PM PT) and locked cooldown bypass (same as the local `.request` file, ~11:07 PM PT). It is still **not built**. A Tailscale listener stays deferred.
 
+When that inbox is built, it uses the operator's **personal Cloudflare** account and **Wrangler**. Not an employer Cloudflare account. Not a blog post. This repository still does not hold Wrangler config or keys.
+
 4. **Prefer a native Mac signal so bots do not have to declare the machine down.**  
    The 2026-10-02 dig found no such file. The ask is for Grok Bot to write connection state locally (working name `local-exec-daemon-connection.json`: `connected`, `lastSseAtMs`, `reason`) when the daemon’s SSE session connects, drops, or stalls. If that signal is proven against a real `connected=false` window and a healthy-hour baseline, the LaunchAgent heals on it and `cloudConnectObservable` may become true **for that signal only**. Until then the flag stays `false`.
 

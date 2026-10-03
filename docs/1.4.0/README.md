@@ -10,6 +10,7 @@
 |---|---|
 | [SPEC-1.4.0-beacon.md](SPEC-1.4.0-beacon.md) | Proposal. Worker inbox default. Beacon heal bypasses the 300s cooldown. Nothing here is code. |
 | [LISTMACHINES-MAC-EXPOSURE-20261002.md](LISTMACHINES-MAC-EXPOSURE-20261002.md) | Dig: no on-disk mirror of `ListMachines.connected`. |
+| [RESEARCH-GROK-BOT-CONNECTION-20261002.md](RESEARCH-GROK-BOT-CONNECTION-20261002.md) | Public docs + 0.66.0 dig: no LaunchAgent-usable mirror of `ListMachines.connected`. Native heal waits on a non-secret status file. |
 | [GROK-BOT-LOCAL-EXEC-INSPECT.md](GROK-BOT-LOCAL-EXEC-INSPECT.md) | Where the cloud bit lives (in the daemon process, not a file). |
 | [PROVE-1.3.0.md](PROVE-1.3.0.md) | 1.3.0 install prove. Fixtures 16/16. Live process-down skipped. S-NEW-D still open. |
 | [INCIDENT-2026-10-02-notes.md](INCIDENT-2026-10-02-notes.md) | Working notes for the 22:08–22:27 PT outage. Public narrative: [../INCIDENT-2026-10-02.md](../INCIDENT-2026-10-02.md). |

@@ -14,6 +14,7 @@ Bar: [PRODUCT-BAR.md](PRODUCT-BAR.md).
 - [ ] **Prove S-NEW-D via beacon.** Plan C then D in [1.4.0/SPEC-1.4.0-beacon.md](1.4.0/SPEC-1.4.0-beacon.md). From the box, POST one valid heal-request **without** using a live Mac shell to touch the `.request` file. Pass: pid changes and `last.json` shows the beacon reason, then `healed`/`ready` or an honest `heal_incomplete`. Replay, expired `exp`, and bad schema must not relaunch. Disable file must block. Do not edit `last.json` by hand. Do not call a process kill S-NEW-D (that is S1, already in 1.3.0).
 - [ ] **Product ask: connection JSON.** Ask for a durable local file, working name `local-exec-daemon-connection.json`, shaped `{connected, lastSseAtMs, reason}`, written on SSE connect, disconnect, and stall. That is the preferred signal so bots do not have to declare the Mac down. Track the ask outside this repo; do not invent the file here.
 - [x] **Deep research folded in** (2026-10-02 ~11:07–11:13 PM PT). Sources: [1.4.0/GROK-BOT-LOCAL-EXEC-INSPECT.md](1.4.0/GROK-BOT-LOCAL-EXEC-INSPECT.md), [1.4.0/LISTMACHINES-MAC-EXPOSURE-20261002.md](1.4.0/LISTMACHINES-MAC-EXPOSURE-20261002.md).
+- [x] **Connection-signal research** (2026-10-02 ~11:22–11:40 PM PT). [1.4.0/RESEARCH-GROK-BOT-CONNECTION-20261002.md](1.4.0/RESEARCH-GROK-BOT-CONNECTION-20261002.md). No usable Mac mirror of `ListMachines.connected` on 0.66.0. Native auto-heal waits on a non-secret status file the app does not write today.
 
 ## Deep research findings (fold-in)
 
@@ -25,6 +26,10 @@ Bar: [PRODUCT-BAR.md](PRODUCT-BAR.md).
 | Named daemon JSON (`local-exec-daemon-connection.json` and siblings) | **String literals only.** Not created on disk during a connected session. |
 | Where SSE state lives | In the local-exec daemon process (`connected` / `disconnected` / `unauthorized` / stall). No TCP listen to poll. |
 | Implication | Do not tighten stale (180s) or frozen (120s) thresholds. That would relaunch a healthy moving heartbeat. Prefer a product-written connection file. Worker inbox is last resort for classes Mac files cannot see. |
+
+## Where the Worker is built
+
+When that inbox is built, use the operator's **personal Cloudflare** account and **Wrangler**. Not an employer Cloudflare account. Not a blog post. Wrangler config and keys stay out of this repository.
 
 ## Explicitly not in 1.4.0 scope
 
