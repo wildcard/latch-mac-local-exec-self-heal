@@ -4,7 +4,7 @@ LaunchAgent that runs **on the Mac** and gently relaunches [Grok Bot](https://gr
 
 It does not need a cloud shell. Once the desktop link is gone, a remote agent cannot install or run this for you — it has to already be loaded.
 
-**Version:** see `VERSION` (current **1.4.0**).
+**Version:** see `VERSION` (current **1.4.1**).
 
 ## 1.3.0 vs 1.4.0
 
@@ -76,6 +76,7 @@ cd mac-local-exec-self-heal
 ```
 
 Re-running copies the script and plist template and reloads the agent. macOS only.
+Custom LaunchAgent `EnvironmentVariables` already on disk (`BEACON_*`, `HEAL_CURSOR`, `COOLDOWN_SEC`, and other operator tunables) are preserved across reinstalls; kit-owned `PATH` comes from the template. Use `INSTALL_RESET_ENV=1` for a deliberate wipe back to template defaults. `INSTALL_SKIP_LAUNCHD=1` is for hermetic tests only — do not export it in your shell profile or the agent will never be (re)registered.
 
 ## Disable / unload
 
