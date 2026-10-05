@@ -1,0 +1,13 @@
+# No account_id here on purpose: wrangler uses whichever account the operator's own
+# personal-Gmail login resolves to. Secrets go in with `wrangler secret put`, never in git.
+name = "latch-worker-beacon"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[[durable_objects.bindings]]
+name = "INBOX"
+class_name = "Inbox"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Inbox"]

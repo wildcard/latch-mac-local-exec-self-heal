@@ -1,5 +1,5 @@
 #!/bin/bash
-# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.3.0.
+# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.0 (+ optional worker-beacon poll).
 # Runs on the Mac without cloud connectivity.
 # Relaunches Grok Bot.app when the desktop process is down, the dune-reliability
 # heartbeat is stale, bootOutcome is not ready, the heartbeat timestamp is frozen,
@@ -14,7 +14,7 @@
 # Set HEAL_CURSOR=1 to also ensure Cursor.app is up.
 set -euo pipefail
 
-KIT_VERSION="1.3.0"
+KIT_VERSION="1.4.0"
 APP_NAME="Grok Bot"
 APP_PATH="${GROK_APP_PATH:-/Applications/Grok Bot.app}"
 SUP="${GROK_SUPPORT_DIR:-$HOME/Library/Application Support/Grok Bot}"
@@ -40,6 +40,14 @@ HEAL_ON_STUCK_SESSION="${HEAL_ON_STUCK_SESSION:-1}"
 HEAL_DRY_RUN="${HEAL_DRY_RUN:-0}"
 HEAL_TRUST_PID="${HEAL_TRUST_PID:-0}"
 HEAL_DISABLE_PGREP="${HEAL_DISABLE_PGREP:-0}"
+# worker-beacon (optional, off unless all three are set). One outbound POST per tick.
+# Token lives in a file outside this repo; it is never logged or put on a command line.
+BEACON_URL="${BEACON_URL:-}"
+BEACON_POLL_TOKEN_FILE="${BEACON_POLL_TOKEN_FILE:-}"
+BEACON_MACHINE_ID="${BEACON_MACHINE_ID:-}"
+BEACON_CURL="${BEACON_CURL:-curl}"
+# One beacon relaunch per outage: a second beacon request inside this window stops and escalates.
+BEACON_RELAUNCH_WINDOW_SEC="${BEACON_RELAUNCH_WINDOW_SEC:-3600}"
 
 PYTHON="${PYTHON:-/usr/bin/python3}"
 if [[ ! -x "$PYTHON" ]]; then
@@ -346,6 +354,50 @@ PY
   BOOT="${R_BOOT:-}"
 }
 
+# Sets BEACON_PENDING=1 only when the Worker returns exactly {"heal":true} (boolean true, sole key).
+# Any failure is a no-op: a dead Worker must never block or trigger local heal.
+beacon_poll() {
+  BEACON_PENDING=0
+  [[ -n "$BEACON_URL" && -n "$BEACON_POLL_TOKEN_FILE" && -n "$BEACON_MACHINE_ID" ]] || return 0
+  [[ -r "$BEACON_POLL_TOKEN_FILE" ]] || { log "beacon: token file unreadable"; return 0; }
+  # Refuse group/world-readable token files (macOS/Linux octal mode).
+  local perms
+  perms="$(stat -f %Lp "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || stat -c %a "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || echo "")"
+  if [[ -n "$perms" ]] && (( (8#$perms & 077) != 0 )); then
+    log "beacon: token file perms too open ($perms); want 600 or tighter"
+    return 0
+  fi
+  local token body resp curl_cfg
+  # Strip CR/LF; reject chars that break curl -K double-quoted header lines (" or \).
+  token="$(tr -d '\n\r' < "$BEACON_POLL_TOKEN_FILE")"
+  if [[ -z "$token" ]]; then
+    log "beacon: token file empty"
+    return 0
+  fi
+  if [[ "$token" == *[\"\\]* ]]; then
+    log "beacon: token contains quote or backslash; refuse"
+    return 0
+  fi
+  body="$("$PYTHON" -c 'import json,sys; print(json.dumps({"machineId": sys.argv[1]}))' "$BEACON_MACHINE_ID")"
+  # Auth header via curl -K on stdin so the token never appears in ps. Escape for curl config quotes.
+  curl_cfg="$("$PYTHON" -c 'import sys
+t = sys.argv[1]
+# Defense in depth: escape \ and " even though we already refused them above.
+esc = t.replace("\\", "\\\\").replace("\"", "\\\"")
+print("header = \"Authorization: Bearer " + esc + "\"")
+' "$token")"
+  resp="$(printf '%s\n' "$curl_cfg"     | "$BEACON_CURL" -sS --max-time 10 -X POST -H 'content-type: application/json'         --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
+  if [[ "$("$PYTHON" -c 'import json,sys
+try:
+    r = json.loads(sys.argv[1])
+    print("1" if isinstance(r, dict) and len(r) == 1 and r.get("heal") is True else "0")
+except Exception:
+    print("0")' "$resp")" == "1" ]]; then
+    BEACON_PENDING=1
+    log "beacon: heal request pending"
+  fi
+}
+
 write_state() {
   local status="$1" reason="$2" action="$3"
   STATUS="$status" REASON="$reason" ACTION="$action" \
@@ -427,6 +479,10 @@ if action == "relaunch":
 elif prev.get("lastHealAtMs"):
     data["lastHealAtMs"] = prev.get("lastHealAtMs")
     data["lastHealIso"] = prev.get("lastHealIso")
+if action == "relaunch" and reason == "beacon_request":
+    data["lastBeaconHealAtMs"] = now_ms
+elif prev.get("lastBeaconHealAtMs"):
+    data["lastBeaconHealAtMs"] = prev.get("lastBeaconHealAtMs")
 
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
@@ -472,10 +528,18 @@ fi
 run_inspect
 
 LAST_HEAL_MS=0
+LAST_BEACON_MS=0
 if [[ -f "$STATE" ]]; then
   LAST_HEAL_MS="$("$PYTHON" -c 'import json,sys
 try:
     print(int(json.load(open(sys.argv[1])).get("lastHealAtMs") or 0))
+except Exception:
+    print(0)' "$STATE" 2>/dev/null || echo 0)"
+fi
+if [[ -f "$STATE" ]]; then
+  LAST_BEACON_MS="$("$PYTHON" -c 'import json,sys
+try:
+    print(int(json.load(open(sys.argv[1])).get("lastBeaconHealAtMs") or 0))
 except Exception:
     print(0)' "$STATE" 2>/dev/null || echo 0)"
 fi
@@ -485,7 +549,21 @@ else
   NOW_MS="$("$PYTHON" -c 'import time; print(int(time.time()*1000))')"
 fi
 
-if [[ "${NEED_HEAL}" == "1" && "$LAST_HEAL_MS" != "0" && "${REASON}" != "operator_request" ]]; then
+# Poll only here: past the disable check, so a disabled Mac never consumes (request stays queued
+# in the Worker until its exp). Do not poll when a local heal is already needed — ack-on-read would
+# burn the flag if cooldown then skips the relaunch (Worker 5m lockout). Still poll inside the
+# beacon suppress window so a second request can escalate. A local operator_request wins when we do poll.
+if [[ "${NEED_HEAL}" != "1" ]]; then
+  beacon_poll
+fi
+if [[ "${BEACON_PENDING:-0}" == "1" && "${REASON}" != "operator_request" && "${NEED_HEAL}" != "1" ]]; then
+  NEED_HEAL=1
+  REASON="beacon_request"
+  READINESS="beacon_request"
+  ESCALATE_HINT=""
+fi
+
+if [[ "${NEED_HEAL}" == "1" && "$LAST_HEAL_MS" != "0" && "${REASON}" != "operator_request" && "${REASON}" != "beacon_request" ]]; then
   ELAPSED=$(( (NOW_MS - LAST_HEAL_MS) / 1000 ))
   if (( ELAPSED < COOLDOWN_SEC )); then
     log "skip heal (cooldown ${ELAPSED}s/${COOLDOWN_SEC}s) reason=$REASON pid=${PID:-}"
@@ -493,6 +571,20 @@ if [[ "${NEED_HEAL}" == "1" && "$LAST_HEAL_MS" != "0" && "${REASON}" != "operato
     ESCALATE_HINT="cooldown_active: relaunch suppressed until COOLDOWN_SEC elapses (last heal too recent)."
     OK_SINCE=""
     write_state "cooldown" "$REASON" "none"
+    exit 0
+  fi
+fi
+
+# Q5: one beacon relaunch per outage. If the previous beacon relaunch did not restore the link the
+# bot will send again; stop and escalate instead of looping (relaunch is not a WAN fix).
+if [[ "${REASON}" == "beacon_request" && "$LAST_BEACON_MS" != "0" ]]; then
+  BELAPSED=$(( (NOW_MS - LAST_BEACON_MS) / 1000 ))
+  if (( BELAPSED < BEACON_RELAUNCH_WINDOW_SEC )); then
+    log "beacon: second request ${BELAPSED}s after a beacon relaunch; not relaunching, escalate"
+    READINESS="beacon_suppressed"
+    ESCALATE_HINT="beacon_second_request: a beacon relaunch ${BELAPSED}s ago did not restore the link. Stop and escalate to a human; relaunch does not fix network, sign-in, or WAN."
+    OK_SINCE=""
+    write_state "beacon_suppressed" "beacon_request" "none"
     exit 0
   fi
 fi

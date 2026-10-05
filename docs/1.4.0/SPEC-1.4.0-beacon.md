@@ -45,7 +45,7 @@ Tonight’s instance of (1): ~22:08–22:27 PT, pre-restart pid unchanged, heart
 | `connected=false`, frozen `heartbeatAtMs` ≥120s | frozen clock | relaunch if `HEAL_ON_STUCK_SESSION=1` | keep |
 | **S-NEW-D** — process up, heartbeat **moving** ~31–45s, cloud false | looks `healthy` | **no relaunch**. `escalateHint` only after `OK_HINT_SEC` (300s) of continuous ok. Does not fix the link | **identify and relaunch** (same quit+open), or accept a beacon heal-request that does |
 | Disable file | file present | skip, wins over request | keep; beacon must not override disable |
-| Cooldown 300s | after a heal | skip; **operator_request bypasses** | keep for keyboard request. Beacon rate-limit is separate (open question) |
+| Cooldown 300s | after a heal | skip; **operator_request bypasses** | keep for keyboard request. Beacon **bypasses** the 300s cooldown (locked); abuse is bounded by the Worker rate limit instead (see Decision locks) |
 | Operator request file | `grok-bot-local-exec-heal.request` | `operator_request`, bypass cooldown, consumed at heal start | keep. **Disconnected agents cannot create this file** — that is why a beacon exists |
 | Cloud connect bit | `cloudConnectObservable=false` | honest | still false until a proven signal or beacon. Do not flip the flag without evidence |
 
@@ -74,7 +74,7 @@ Use only for classes local signals cannot see. Side effect on the Mac is **only*
 
 | Rank | Option | Why |
 |---|---|---|
-| **1 — default** | **Outbound poll of an authenticated heal-only inbox** (Cloudflare Worker or equivalent). Box POSTs a heal-request. Each LaunchAgent tick GETs “pending for this machine?” and, if valid, consumes it and runs the existing heal. | No inbound port. Works through NAT. Box can POST while `Shell(machineId)` is dead. Schema can be rejected server-side and on the Mac. |
+| **1 — default** | **Outbound poll of an authenticated heal-only inbox** (Cloudflare Worker or equivalent). Box POSTs a heal-request. Each LaunchAgent tick POSTs “pending for this machine?” and, if valid, consumes it and runs the existing heal. | No inbound port. Works through NAT. Box can POST while `Shell(machineId)` is dead. Schema can be rejected server-side and on the Mac. |
 | 2 | Tiny HTTPS listener **on Tailscale only** (not `0.0.0.0`, not public LAN). POST body is the same heal-request schema. Handler writes the `.request` file and returns 204. | Lower latency, no third party, but an always-on listener on the Mac. Public or LAN bind is out. |
 | 3 | “Signed POST drops `.request`” as a phrase, not a third design | This is the **handler** for (1) or (2), not a transport. The signature is checked; the only write is the request file. |
 | 4 — last | iCloud / Dropbox file drop | Sync is slow, bidirectional, and not a security boundary. Other files in the account are not heal-requests. Easy to desync or to smuggle extra content. Do not use unless the operator rejects (1) and (2). |
@@ -85,7 +85,7 @@ Use only for classes local signals cannot see. Side effect on the Mac is **only*
 
 1. Allowed writer (box Grok Bot) sends `POST` with a **fixed schema** (additional properties forbidden): `{ "v": 1, "action": "heal_request", "machineId": "<redacted>", "jti": "<uuid>", "exp": <unix> }`. No command string, path, or shell.
 2. Worker checks auth, `exp` (short, ≤120s), single-use `jti`, machine id, and rate limit. Stores at most **one pending flag** per machine. Rejects every other `action` with 400 and stores nothing.
-3. LaunchAgent, inside the existing 60s script, performs one HTTPS GET. On a valid pending flag: delete it (ack) and create `grok-bot-local-exec-heal.request` **or** call the same relaunch used for `operator_request`. Then the 1.3.0 readiness gate applies.
+3. LaunchAgent, inside the existing 60s script, performs one HTTPS POST. On a valid pending flag: delete it (ack) and create `grok-bot-local-exec-heal.request` **or** call the same relaunch used for `operator_request`. Then the 1.3.0 readiness gate applies.
 4. `last.json` gains a reason that distinguishes beacon-triggered heal from a local signal and from a keyboard `operator_request` (names TBD). Still `cloudConnectObservable=false` if the trigger was the beacon.
 
 ### Threat model (default)
@@ -97,11 +97,11 @@ Use only for classes local signals cannot see. Side effect on the Mac is **only*
 | Extra fields or a second message type | Schema allow-list. Unknown `action` dropped. Poll response is a boolean or the same object, never a string to execute. |
 | Inbox used as a backchannel (logs, chat, files) | No GET of arbitrary data. Mac does not upload `last.json` or heal logs on this channel. |
 | Listener exposure (rank 2 only) | Tailscale interface only. Rank 1 has no listener. |
-| Disable file ignored | Disable wins; do not consume the inbox into a relaunch while disabled (leave pending or ack-without-heal — open question). |
+| Disable file ignored | Disable wins. While `.disable` is present the Mac does not poll-consume: the pending flag stays queued (Worker `exp` ≤120s then drops it) and no relaunch happens. Locked, see Q4. |
 | Key in git | Machine key or signing secret stays off the public repo. Provision out of band. |
 | Confused deputy (any agent) | Only credentials held by named operators (at least box Grok Bot for this Mac id). |
 
-Auth proposal: HMAC or bearer scoped to one `machineId`, rotatable, not the user’s Google/xAI session. Exact crypto is an open question, not a commitment.
+Auth (decided, v1): two **Bearer tokens**, `WRITER_TOKEN` (box Grok Bot, may POST a heal-request) and `POLLER_TOKEN` (Mac, may poll), plus a machine-id allow-list, all provisioned out of band as Wrangler secrets. Neither is the user’s Google/xAI session. A per-request HMAC over the body is the documented alternative if bearer replay ever matters more than simplicity. This is a design choice, not a secret; no key material is ever committed.
 
 ## Prove plan for S-NEW-D (no fake state)
 
@@ -121,19 +121,21 @@ Only a real cloud disconnect while local heartbeat keeps moving. Pass: either th
 
 Live quit tests still need a soft-park and `LIVE=1`. C and D bounce the Dock icon.
 
-## Open questions
+## Open questions (resolved)
 
-1. Is the Worker inbox acceptable, or is Tailscale-only (rank 2) required so no third party sees a heal bit?
-2. Who may hold the writer credential besides box Grok Bot? One Mac id (`machineId <redacted>`) only, or every Latch Mac?
-3. Does a beacon heal **bypass** the 300s cooldown the way the keyboard request file does, or stay rate-limited?
-4. While `.disable` is present, ack-and-drop the pending request, or leave it queued?
-5. After one beacon relaunch, if `connected` is still false, is the next step “stop and escalate” (recommended) or allow a second try inside the hour cap?
-6. Any known Grok Bot local artifact for cloud session state that 1.3.0 is not already reading? If yes, name it before inventing a poller.
-7. Version bump 1.4.0 and public CHANGELOG only after B or D passes — confirm publish stays behind operator GO.
+Resolved 2026-10-05 per operator standing ask; locks are recorded under Decision locks below. Original wording kept short for history.
+
+1. **Worker inbox vs Tailscale-only:** Worker inbox. Locked 2026-10-02 ~11:04 PM PT. Tailscale deferred.
+2. **Who may hold the writer credential:** the box Grok Bot, scoped to the allow-listed machine id(s) only. Not every Latch Mac, not an operator’s session.
+3. **Cooldown bypass:** beacon heal **bypasses** the 300s cooldown, same as `.request`. Locked 2026-10-02 ~11:07 PM PT. Abuse bound is the Worker rate limit (1 accepted / 5 min, 3 / hour per machine).
+4. **While `.disable` is present:** **leave the request queued.** Do not ack-and-drop. Disable still blocks the relaunch. The Worker `exp` (≤120s) expires the flag, so removing `.disable` later does not fire a stale heal.
+5. **After one beacon relaunch, `connected` still false:** **stop and escalate.** One beacon relaunch per outage, no second try inside the hour for the same outage. Relaunch is the only action; it is not a WAN fix.
+6. **Known local artifact for cloud session state:** none on Grok Bot 0.66.0 (see research docs). The Worker stays last resort until a native connection file exists.
+7. **Version bump and public CHANGELOG:** 1.4.0 bumped after Prove C (beacon path) passed; public publish stays behind operator GO. Prove D remains open.
 
 ## Out of this addendum
 
-No patch, no install, no `gh` write, no change to 1.3.0 files. Implementation starts only after the operator picks the open questions that block the default (at minimum 1, 3, and 6).
+No patch, no install, no `gh` write, no change to 1.3.0 files. Implementation of the Worker source and the Mac poll hook may proceed now that 1, 3, 4, and 5 are locked. Deploy and secrets stay with a human.
 
 
 ## Decision lock (2026-10-02 ~11:04 PM PT)
@@ -160,3 +162,14 @@ The preferred Mac-side signal was checked on a **connected** Mac (Grok Bot 0.66.
 **Product ask:** have Grok Bot write a durable file (working name `local-exec-daemon-connection.json`) with `{connected, lastSseAtMs, reason}` on connect, disconnect, and stall. The LaunchAgent can then heal that class with the existing quit + `open -ga "Grok Bot"` without a bot declaring the Mac down.
 
 **Until that file exists:** Worker heal-only inbox (decision lock) is the last resort. Not implemented in 1.3.0.
+
+
+## Decision lock (2026-10-05)
+
+Operator standing ask, recorded so no doc still reads these as open:
+
+- **Q1** Worker inbox is the default beacon transport (unchanged from 2026-10-02 ~11:04 PM PT).
+- **Q3** Beacon bypasses the 300s cooldown (unchanged from ~11:07 PM PT).
+- **Q4** While `.disable` is present the heal-request stays queued (not ack-and-dropped); disable still blocks the relaunch; `exp` ≤120s expires it.
+- **Q5** One beacon relaunch, then stop and escalate if `connected` is still false. No second try inside the hour for the same outage.
+- **Auth** Bearer tokens (`WRITER_TOKEN`, `POLLER_TOKEN`) for v1; per-request HMAC is a documented alternative. A design choice, not a secret. No keys in git.

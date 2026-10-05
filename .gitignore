@@ -1,3 +1,10 @@
 .DS_Store
 *.log
 __pycache__/
+
+# local latch receipts / auth scratch (do not commit)
+.latch-local/
+
+# worker-beacon local state / deps
+.wrangler/
+node_modules/
