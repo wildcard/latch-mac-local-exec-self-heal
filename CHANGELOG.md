@@ -2,7 +2,7 @@
 
 ## Unreleased — 1.4.0 (proposed, not shipped)
 
-Docs only. **`VERSION` remains 1.3.0.** S-NEW-D is **not** auto-healed by the LaunchAgent in this tree.
+**`VERSION` remains 1.3.0.** Worker source and Mac poll hook added, **not deployed, not proven live**. S-NEW-D is **not** auto-healed by the LaunchAgent in this tree.
 
 - Proposal and research under `docs/1.4.0/` (beacon spec, Mac exposure dig, 1.3.0 prove record, pre-1.3 gap spec).
 - Product bar (`docs/PRODUCT-BAR.md`): catch every `ListMachines.connected=false` class, including S-NEW-D; the only fix is restarting Grok Bot; Worker heal-only inbox is last resort; prefer a native Mac connection file so bots need not declare the machine down.
@@ -10,7 +10,10 @@ Docs only. **`VERSION` remains 1.3.0.** S-NEW-D is **not** auto-healed by the La
 - Research fold-in: no on-disk or localhost signal mirrored `ListMachines.connected` on 2026-10-02. Named `local-exec-*-connection` files were source strings only. Do not lower stale or frozen thresholds to fake a fix.
 - Connection-signal research (`docs/1.4.0/RESEARCH-GROK-BOT-CONNECTION-20261002.md`): public docs and the 0.66.0 dig still show no LaunchAgent-usable mirror of `ListMachines.connected`. Do not scrape credential JSON or treat a missing daemon file as disconnected.
 - Self-heal modes matrix (`docs/1.4.0/SELF-HEAL-MODES.md`, ~11:35 PM PT bar): none / mac-local / worker-beacon / vitals-buddy; deploy-time multi-mode pack. Product bar and tasks updated. No Worker or buddy code.
-- Not in this change: Cloudflare Worker, Wrangler config, Mac poll client, plist, heal script, tests, or a version bump. No secrets.
+- Decision locks 2026-10-05: while `.disable` is present a beacon heal-request stays queued and disable still blocks relaunch; one beacon relaunch per outage then stop and escalate; auth v1 is Bearer tokens (HMAC documented alternative).
+- `worker-beacon/`: heal-only inbox Worker source (strict `heal_request` schema, single-use `jti`, `exp` ≤120s, per-machine Durable Object, 1/5min and 3/hour limit) with unit tests. No account id, no secrets. Not deployed.
+- Heal script: optional outbound beacon poll once per tick (`BEACON_URL`, `BEACON_POLL_TOKEN_FILE`, `BEACON_MACHINE_ID`), off unless configured. Distinct reason `beacon_request`. Fixture tests only.
+- Not in this change: deploy, secrets, a version bump.
 
 ## 1.3.0 — 2026-10-02
 - Readiness gate: after `open -ga`, `healed` is written only when the process is up and (heartbeat age is finite and under `HEARTBEAT_STALE_SEC`, or `bootOutcome=ready`). Bounded wait `READINESS_WAIT_SEC` (default 75). Otherwise `heal_incomplete` or `heal_failed` with `readiness` and `escalateHint`.

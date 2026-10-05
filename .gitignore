@@ -1,3 +1,6 @@
 .DS_Store
 *.log
 __pycache__/
+
+# local latch receipts / auth scratch (do not commit)
+.latch-local/

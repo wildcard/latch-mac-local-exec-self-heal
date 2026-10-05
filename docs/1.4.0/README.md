@@ -25,6 +25,7 @@ Product bar: [../PRODUCT-BAR.md](../PRODUCT-BAR.md). Checklist: [../TASKS-1.4.0.
 2. **2026-10-02 ~11:07 PM PT.** A Worker heal-request **bypasses** the 300s relaunch cooldown, same as the local `.request` file.
 3. **2026-10-02 ~11:13 PM PT.** No native signal was found. Product should write connection JSON. Worker remains last resort, not a shipped feature.
 4. **2026-10-02 ~11:35 PM PT.** Self-heal is a **multi-mode pack**: none, mac-local (1.3.0), worker-beacon (proposed), vitals-buddy (proposed). Latch presents trade-offs; user picks mode(s). Worker and buddy are not built in this change.
+5. **2026-10-05.** Q4: while `.disable` is present a pending heal-request stays queued and disable still blocks relaunch. Q5: one beacon relaunch, then stop and escalate if `connected` is still false. Auth v1: Bearer tokens, HMAC as documented alternative. Worker source and Mac poll hook may be built; deploy and secrets stay with a human.
 
 ## What this directory does not do
 

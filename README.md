@@ -10,7 +10,7 @@ It does not need a cloud shell. Once the desktop link is gone, a remote agent ca
 
 | | **1.3.0 (this tree, `VERSION`)** | **1.4.0 (proposal only)** |
 |---|---|---|
-| Status | Shipped. LaunchAgent, tests, install. | Docs under [`docs/1.4.0/`](docs/1.4.0/). No script, plist, Worker, or version bump. |
+| Status | Shipped. LaunchAgent, tests, install. | Docs under [`docs/1.4.0/`](docs/1.4.0/), Worker source in [`worker-beacon/`](worker-beacon/) (not deployed), optional beacon poll hook (off by default, not proven live). No version bump. |
 | What it heals | Dead process, stale heartbeat, bad `bootOutcome`, frozen `heartbeatAtMs`, on-Mac `.request` file. | Same, **plus** the classes 1.3.0 cannot see — especially S-NEW-D. |
 | S-NEW-D | **Not auto-healed.** Moving heartbeat under 180s stays `ok` / `local_healthy`. `cloudConnectObservable` is always `false`. Long ok streak sets `escalateHint` only. | Must identify the class and relaunch (quit + `open -ga "Grok Bot"`), or accept a heal-only beacon that does that. **Not implemented. Not proven.** |
 | How S-NEW-D would be seen | It cannot. | Prefer a native connection file written by Grok Bot so a bot does not have to declare the Mac down. 2026-10-02 dig found no such file. Last resort: personal Cloudflare Worker, heal-request only, Mac outbound poll. Beacon would bypass the 300s cooldown. See [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md). |
