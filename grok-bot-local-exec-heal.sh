@@ -1,5 +1,5 @@
 #!/bin/bash
-# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.3.0 (+ optional worker-beacon poll, unreleased).
+# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.0 (+ optional worker-beacon poll).
 # Runs on the Mac without cloud connectivity.
 # Relaunches Grok Bot.app when the desktop process is down, the dune-reliability
 # heartbeat is stale, bootOutcome is not ready, the heartbeat timestamp is frozen,
@@ -14,7 +14,7 @@
 # Set HEAL_CURSOR=1 to also ensure Cursor.app is up.
 set -euo pipefail
 
-KIT_VERSION="1.3.0"
+KIT_VERSION="1.4.0"
 APP_NAME="Grok Bot"
 APP_PATH="${GROK_APP_PATH:-/Applications/Grok Bot.app}"
 SUP="${GROK_SUPPORT_DIR:-$HOME/Library/Application Support/Grok Bot}"
@@ -354,21 +354,43 @@ PY
   BOOT="${R_BOOT:-}"
 }
 
-# Sets BEACON_PENDING=1 only when the Worker returns exactly {"heal":true}. Any failure is a no-op:
-# a dead Worker must never block or trigger local heal.
+# Sets BEACON_PENDING=1 only when the Worker returns exactly {"heal":true} (boolean true, sole key).
+# Any failure is a no-op: a dead Worker must never block or trigger local heal.
 beacon_poll() {
   BEACON_PENDING=0
   [[ -n "$BEACON_URL" && -n "$BEACON_POLL_TOKEN_FILE" && -n "$BEACON_MACHINE_ID" ]] || return 0
   [[ -r "$BEACON_POLL_TOKEN_FILE" ]] || { log "beacon: token file unreadable"; return 0; }
-  local body resp
+  # Refuse group/world-readable token files (macOS/Linux octal mode).
+  local perms
+  perms="$(stat -f %Lp "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || stat -c %a "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || echo "")"
+  if [[ -n "$perms" ]] && (( (8#$perms & 077) != 0 )); then
+    log "beacon: token file perms too open ($perms); want 600 or tighter"
+    return 0
+  fi
+  local token body resp curl_cfg
+  # Strip CR/LF; reject chars that break curl -K double-quoted header lines (" or \).
+  token="$(tr -d '\n\r' < "$BEACON_POLL_TOKEN_FILE")"
+  if [[ -z "$token" ]]; then
+    log "beacon: token file empty"
+    return 0
+  fi
+  if [[ "$token" == *[\"\\]* ]]; then
+    log "beacon: token contains quote or backslash; refuse"
+    return 0
+  fi
   body="$("$PYTHON" -c 'import json,sys; print(json.dumps({"machineId": sys.argv[1]}))' "$BEACON_MACHINE_ID")"
-  # Auth header goes through a curl config on stdin so the token never appears in ps.
-  resp="$({ printf 'header = "Authorization: Bearer '; tr -d '\n\r' < "$BEACON_POLL_TOKEN_FILE"; printf '"\n'; } \
-    | "$BEACON_CURL" -sS --max-time 10 -X POST -H 'content-type: application/json' \
-        --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
+  # Auth header via curl -K on stdin so the token never appears in ps. Escape for curl config quotes.
+  curl_cfg="$("$PYTHON" -c 'import sys
+t = sys.argv[1]
+# Defense in depth: escape \ and " even though we already refused them above.
+esc = t.replace("\\", "\\\\").replace("\"", "\\\"")
+print("header = \"Authorization: Bearer " + esc + "\"")
+' "$token")"
+  resp="$(printf '%s\n' "$curl_cfg"     | "$BEACON_CURL" -sS --max-time 10 -X POST -H 'content-type: application/json'         --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
   if [[ "$("$PYTHON" -c 'import json,sys
 try:
-    print("1" if json.loads(sys.argv[1]) == {"heal": True} else "0")
+    r = json.loads(sys.argv[1])
+    print("1" if isinstance(r, dict) and len(r) == 1 and r.get("heal") is True else "0")
 except Exception:
     print("0")' "$resp")" == "1" ]]; then
     BEACON_PENDING=1
@@ -505,16 +527,6 @@ fi
 
 run_inspect
 
-# Poll only here: past the disable check, so a disabled Mac never consumes (request stays queued
-# in the Worker until its exp). A local operator_request wins over a beacon request.
-beacon_poll
-if [[ "${BEACON_PENDING:-0}" == "1" && "${REASON}" != "operator_request" && "${NEED_HEAL}" != "1" ]]; then
-  NEED_HEAL=1
-  REASON="beacon_request"
-  READINESS="beacon_request"
-  ESCALATE_HINT=""
-fi
-
 LAST_HEAL_MS=0
 LAST_BEACON_MS=0
 if [[ -f "$STATE" ]]; then
@@ -535,6 +547,20 @@ if [[ -n "${HEAL_NOW_MS:-}" ]]; then
   NOW_MS="$HEAL_NOW_MS"
 else
   NOW_MS="$("$PYTHON" -c 'import time; print(int(time.time()*1000))')"
+fi
+
+# Poll only here: past the disable check, so a disabled Mac never consumes (request stays queued
+# in the Worker until its exp). Do not poll when a local heal is already needed — ack-on-read would
+# burn the flag if cooldown then skips the relaunch (Worker 5m lockout). Still poll inside the
+# beacon suppress window so a second request can escalate. A local operator_request wins when we do poll.
+if [[ "${NEED_HEAL}" != "1" ]]; then
+  beacon_poll
+fi
+if [[ "${BEACON_PENDING:-0}" == "1" && "${REASON}" != "operator_request" && "${NEED_HEAL}" != "1" ]]; then
+  NEED_HEAL=1
+  REASON="beacon_request"
+  READINESS="beacon_request"
+  ESCALATE_HINT=""
 fi
 
 if [[ "${NEED_HEAL}" == "1" && "$LAST_HEAL_MS" != "0" && "${REASON}" != "operator_request" && "${REASON}" != "beacon_request" ]]; then

@@ -15,6 +15,8 @@ Worker-beacon heal-only inbox: a Cloudflare Worker plus an optional Mac poll hoo
 - Heal script: optional outbound beacon poll once per tick (`BEACON_URL`, `BEACON_POLL_TOKEN_FILE`, `BEACON_MACHINE_ID`), off unless configured. Distinct reason `beacon_request`. Fixture tests plus the live Prove C below.
 - **Prove C: PASS** on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)). A heal request POSTed from a remote box (not by creating the local `.request` file) relaunched Grok Bot with reason `beacon_request`: old pid replaced, `status=healed`, `readiness=ready`. Bad requests (missing `exp`, expired, unsupported action) were each rejected with 400; a replayed `jti` got 409 and a second accept inside 5 minutes got 429. This is **not** Prove D. S-NEW-D under a real cloud disconnect with a moving heartbeat is still unproven. Not done: Prove D; the optional live `.disable`-blocks-beacon check.
 - `.gitignore`: `.wrangler/` and `node_modules/`.
+- Follow-up on `feat/worker-beacon-inbox`: `KIT_VERSION` stamped 1.4.0; poll skipped when a local heal is already needed (avoids consuming a beacon request into cooldown); token file must not be group/world-readable and must not contain `"`/`\`; poll accepts only `{"heal":true}`; Worker index + `timingSafeEqual` covered by tests; poll unknown-machine status aligned to 403.
+
 
 ## 1.3.0 — 2026-10-02
 - Readiness gate: after `open -ga`, `healed` is written only when the process is up and (heartbeat age is finite and under `HEARTBEAT_STALE_SEC`, or `bootOutcome=ready`). Bounded wait `READINESS_WAIT_SEC` (default 75). Otherwise `heal_incomplete` or `heal_failed` with `readiness` and `escalateHint`.

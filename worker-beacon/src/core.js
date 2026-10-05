@@ -38,7 +38,7 @@ export function accept(state, body, now) {
   if (s.accepted.filter((t) => now - t < 3600).length >= MAX_PER_HOUR) return { status: 429, error: "hourly cap", state: s };
 
   s.seen[body.jti] = body.exp;
-  // One pending flag: a second accepted request just refreshes it, never stacks.
+  // One pending flag (never stacks). Rate limit gap (300s) > max exp (120s), so a second accept cannot land while one is still pending.
   s.pending = { jti: body.jti, exp: body.exp };
   s.accepted.push(now);
   return { status: 202, state: s };

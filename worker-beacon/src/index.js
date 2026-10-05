@@ -27,10 +27,10 @@ export default {
     try { body = await request.json(); } catch { return json({ error: "invalid json" }, 400); }
 
     const allowed = String(env.ALLOWED_MACHINE_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
-    const machineId = isHeal ? body && body.machineId : body && body.machineId;
+    const machineId = body && body.machineId;
     if (typeof machineId !== "string" || !allowed.includes(machineId)) {
       // Unknown machine: do not reveal which ids exist, store nothing.
-      return json({ error: isHeal && body && typeof body === "object" ? "machine not allowed" : "bad request" }, isHeal ? 403 : 400);
+      return json({ error: "machine not allowed" }, 403);
     }
 
     const stub = env.INBOX.get(env.INBOX.idFromName(machineId));

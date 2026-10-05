@@ -74,7 +74,7 @@ Use only for classes local signals cannot see. Side effect on the Mac is **only*
 
 | Rank | Option | Why |
 |---|---|---|
-| **1 — default** | **Outbound poll of an authenticated heal-only inbox** (Cloudflare Worker or equivalent). Box POSTs a heal-request. Each LaunchAgent tick GETs “pending for this machine?” and, if valid, consumes it and runs the existing heal. | No inbound port. Works through NAT. Box can POST while `Shell(machineId)` is dead. Schema can be rejected server-side and on the Mac. |
+| **1 — default** | **Outbound poll of an authenticated heal-only inbox** (Cloudflare Worker or equivalent). Box POSTs a heal-request. Each LaunchAgent tick POSTs “pending for this machine?” and, if valid, consumes it and runs the existing heal. | No inbound port. Works through NAT. Box can POST while `Shell(machineId)` is dead. Schema can be rejected server-side and on the Mac. |
 | 2 | Tiny HTTPS listener **on Tailscale only** (not `0.0.0.0`, not public LAN). POST body is the same heal-request schema. Handler writes the `.request` file and returns 204. | Lower latency, no third party, but an always-on listener on the Mac. Public or LAN bind is out. |
 | 3 | “Signed POST drops `.request`” as a phrase, not a third design | This is the **handler** for (1) or (2), not a transport. The signature is checked; the only write is the request file. |
 | 4 — last | iCloud / Dropbox file drop | Sync is slow, bidirectional, and not a security boundary. Other files in the account are not heal-requests. Easy to desync or to smuggle extra content. Do not use unless the operator rejects (1) and (2). |
@@ -85,7 +85,7 @@ Use only for classes local signals cannot see. Side effect on the Mac is **only*
 
 1. Allowed writer (box Grok Bot) sends `POST` with a **fixed schema** (additional properties forbidden): `{ "v": 1, "action": "heal_request", "machineId": "<redacted>", "jti": "<uuid>", "exp": <unix> }`. No command string, path, or shell.
 2. Worker checks auth, `exp` (short, ≤120s), single-use `jti`, machine id, and rate limit. Stores at most **one pending flag** per machine. Rejects every other `action` with 400 and stores nothing.
-3. LaunchAgent, inside the existing 60s script, performs one HTTPS GET. On a valid pending flag: delete it (ack) and create `grok-bot-local-exec-heal.request` **or** call the same relaunch used for `operator_request`. Then the 1.3.0 readiness gate applies.
+3. LaunchAgent, inside the existing 60s script, performs one HTTPS POST. On a valid pending flag: delete it (ack) and create `grok-bot-local-exec-heal.request` **or** call the same relaunch used for `operator_request`. Then the 1.3.0 readiness gate applies.
 4. `last.json` gains a reason that distinguishes beacon-triggered heal from a local signal and from a keyboard `operator_request` (names TBD). Still `cloudConnectObservable=false` if the trigger was the beacon.
 
 ### Threat model (default)
@@ -131,7 +131,7 @@ Resolved 2026-10-05 per operator standing ask; locks are recorded under Decision
 4. **While `.disable` is present:** **leave the request queued.** Do not ack-and-drop. Disable still blocks the relaunch. The Worker `exp` (≤120s) expires the flag, so removing `.disable` later does not fire a stale heal.
 5. **After one beacon relaunch, `connected` still false:** **stop and escalate.** One beacon relaunch per outage, no second try inside the hour for the same outage. Relaunch is the only action; it is not a WAN fix.
 6. **Known local artifact for cloud session state:** none on Grok Bot 0.66.0 (see research docs). The Worker stays last resort until a native connection file exists.
-7. **Version bump and public CHANGELOG:** only after prove B or D passes; publish stays behind operator GO.
+7. **Version bump and public CHANGELOG:** 1.4.0 bumped after Prove C (beacon path) passed; public publish stays behind operator GO. Prove D remains open.
 
 ## Out of this addendum
 

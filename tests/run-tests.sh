@@ -99,7 +99,7 @@ t_healthy() {
   [[ "$(jget readiness)" == "local_healthy" ]] || die "readiness=$(jget readiness)"
   [[ "$(jget escalateHint)" == "None" ]] || die "hint=$(jget escalateHint)"
   [[ "$(jget pid)" == "4242" ]] || die "pid=$(jget pid)"
-  [[ "$(jget kitVersion)" == "1.3.0" ]] || die "kit=$(jget kitVersion)"
+  [[ "$(jget kitVersion)" == "1.4.0" ]] || die "kit=$(jget kitVersion)"
   [[ "$(jget lastHealAtMs)" == "None" ]] || die "unexpected heal stamp"
   grep -q "heal start" "$HEAL_LOG" && die "healthy tick relaunched" || true
 }
@@ -319,6 +319,7 @@ beacon_env() {
   export BEACON_MACHINE_ID="test-machine"
   export BEACON_POLL_TOKEN_FILE="$TMP/poll-token"
   printf 'fake-poll-token-for-tests\n' > "$BEACON_POLL_TOKEN_FILE"
+  chmod 600 "$BEACON_POLL_TOKEN_FILE"
   export BEACON_CURL="$FIX/beacon-curl-stub.sh"
   export BEACON_STUB_CALLS="$TMP/curl-calls"
   export BEACON_STUB_RESPONSE='{"heal":true}'
@@ -349,7 +350,7 @@ t_beacon_false_noop() {
 
 t_beacon_bad_response_noop() {
   beacon_env
-  for r in '{"heal":true,"cmd":"x"}' 'not json' '{"heal":"true"}' ''; do
+  for r in '{"heal":true,"cmd":"x"}' 'not json' '{"heal":"true"}' '{"heal":1}' ''; do
     export BEACON_STUB_RESPONSE="$r"
     rm -f "$HEAL_STATE"
     run_heal
@@ -416,6 +417,46 @@ t_beacon_operator_request_wins() {
   [[ "$(jget reason)" == "operator_request" ]] || die "reason=$(jget reason)"
 }
 
+
+t_kit_version_matches() {
+  local ver kit
+  ver="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+  kit="$(grep -E '^KIT_VERSION=' "$HEAL" | head -1 | sed -E 's/^KIT_VERSION="//; s/"$//')"
+  [[ "$ver" == "1.4.0" ]] || die "VERSION=$ver"
+  [[ "$kit" == "$ver" ]] || die "KIT_VERSION=$kit VERSION=$ver"
+}
+
+t_beacon_skip_poll_when_local_heal_cooldown() {
+  # Local heal needed + cooldown: must NOT poll (would consume + Worker 5m lockout).
+  beacon_env
+  local now; now="$(now_ms)"
+  export HEAL_NOW_MS="$now"
+  materialize "$FIX/stale-hb" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"healed\",\"pid\":4242,\"lastHealAtMs\":$((now - 30000))}"
+  run_heal
+  [[ "$(jget status)" == "cooldown" ]] || die "status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled during local-heal cooldown (would consume)"
+}
+
+t_beacon_token_world_readable_refuses() {
+  beacon_env
+  chmod 644 "$BEACON_POLL_TOKEN_FILE"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled with world-readable token"
+  grep -q "perms too open" "$HEAL_LOG" || die "missing perms log"
+}
+
+t_beacon_token_quote_refuses() {
+  beacon_env
+  printf 'bad"token\n' > "$BEACON_POLL_TOKEN_FILE"
+  chmod 600 "$BEACON_POLL_TOKEN_FILE"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled with quote in token"
+  grep -q "quote or backslash" "$HEAL_LOG" || die "missing refuse log"
+}
+
 echo "kit $(cat "$ROOT/VERSION")  heal=$HEAL"
 run_case T-healthy t_healthy
 run_case T-disable t_disable
@@ -433,6 +474,7 @@ run_case T-ok-escalate-hint t_ok_escalate_hint
 run_case T-no-heartbeat-soft t_no_heartbeat_soft
 run_case T-stuck-flag-off t_stuck_flag_off
 run_case T-app-missing t_app_missing
+run_case T-kit-version-matches t_kit_version_matches
 run_case T-beacon-heal t_beacon_heal
 run_case T-beacon-false-noop t_beacon_false_noop
 run_case T-beacon-bad-response-noop t_beacon_bad_response_noop
@@ -442,6 +484,9 @@ run_case T-beacon-bypasses-cooldown t_beacon_bypasses_cooldown
 run_case T-beacon-disabled-stays-queued t_beacon_disabled_no_poll_stays_queued
 run_case T-beacon-second-request-escalates t_beacon_second_request_escalates
 run_case T-beacon-operator-request-wins t_beacon_operator_request_wins
+run_case T-beacon-skip-poll-local-cooldown t_beacon_skip_poll_when_local_heal_cooldown
+run_case T-beacon-token-world-readable t_beacon_token_world_readable_refuses
+run_case T-beacon-token-quote-refuses t_beacon_token_quote_refuses
 
 echo
 echo "passed=$PASS failed=$FAIL"

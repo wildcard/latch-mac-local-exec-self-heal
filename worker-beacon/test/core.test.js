@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { accept, consume, emptyState, validateBody } from "../src/core.js";
+import { accept, consume, emptyState, validateBody, timingSafeEqual } from "../src/core.js";
 
 const NOW = 1_800_000_000;
 const J1 = "11111111-1111-4111-8111-111111111111";
@@ -46,7 +46,7 @@ test("rate limit: 5 min gap and 3/hour", () => {
   assert.deepEqual(results, [202, 202, 429]); // 1 + 2 = 3 accepted in the hour, 4th blocked
 });
 
-test("second accepted request refreshes the single pending flag, never stacks", () => {
+test("after the rate-limit gap, a new accept replaces any prior pending flag", () => {
   let s = accept(emptyState(), body(), NOW).state;
   s = accept(s, body({ jti: J2, exp: NOW + 400 + 60 }), NOW + 400).state;
   assert.equal(consume(s, NOW + 401).heal, true);
@@ -56,4 +56,10 @@ test("second accepted request refreshes the single pending flag, never stacks", 
 test("expired pending flag is not returned", () => {
   const a = accept(emptyState(), body(), NOW);
   assert.equal(consume(a.state, NOW + 61).heal, false);
+});
+
+test("timingSafeEqual matches equal secrets and rejects unequal", async () => {
+  assert.equal(await timingSafeEqual("same-token", "same-token"), true);
+  assert.equal(await timingSafeEqual("writer-token", "poller-token"), false);
+  assert.equal(await timingSafeEqual("", "x"), false);
 });
