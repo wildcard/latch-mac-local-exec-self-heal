@@ -312,6 +312,110 @@ t_app_missing() {
   [[ "$(jget readiness)" == "app_missing" ]] || die "readiness=$(jget readiness)"
 }
 
+
+# --- worker-beacon poll hook (curl is stubbed; no network) ---
+beacon_env() {
+  export BEACON_URL="https://beacon.invalid"
+  export BEACON_MACHINE_ID="test-machine"
+  export BEACON_POLL_TOKEN_FILE="$TMP/poll-token"
+  printf 'fake-poll-token-for-tests\n' > "$BEACON_POLL_TOKEN_FILE"
+  export BEACON_CURL="$FIX/beacon-curl-stub.sh"
+  export BEACON_STUB_CALLS="$TMP/curl-calls"
+  export BEACON_STUB_RESPONSE='{"heal":true}'
+  : > "$BEACON_STUB_CALLS"
+  local now; now="$(now_ms)"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+}
+
+t_beacon_heal() {
+  beacon_env
+  run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ "$(jget status)" == "healed" ]] || die "status=$(jget status)"
+  [[ "$(jget action)" == "relaunch" ]] || die "action=$(jget action)"
+  [[ "$(jget lastBeaconHealAtMs)" != "None" ]] || die "no beacon stamp"
+  [[ "$(jget cloudConnectObservable)" == "False" ]] || die "cloudConnectObservable flipped"
+  grep -q "fake-poll-token" "$BEACON_STUB_CALLS" && die "token leaked into curl argv" || true
+  grep -q "fake-poll-token" "$HEAL_LOG" && die "token leaked into log" || true
+}
+
+t_beacon_false_noop() {
+  beacon_env
+  export BEACON_STUB_RESPONSE='{"heal":false}'
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  grep -q "heal start" "$HEAL_LOG" && die "relaunched on heal:false" || true
+}
+
+t_beacon_bad_response_noop() {
+  beacon_env
+  for r in '{"heal":true,"cmd":"x"}' 'not json' '{"heal":"true"}' ''; do
+    export BEACON_STUB_RESPONSE="$r"
+    rm -f "$HEAL_STATE"
+    run_heal
+    [[ "$(jget status)" == "ok" ]] || die "status=$(jget status) for response: $r"
+  done
+}
+
+t_beacon_worker_down_noop() {
+  beacon_env
+  export BEACON_STUB_FAIL=1
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+}
+
+t_beacon_unconfigured_no_poll() {
+  beacon_env
+  unset BEACON_URL
+  run_heal
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled while unconfigured"
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+}
+
+t_beacon_bypasses_cooldown() {
+  beacon_env
+  local now; now="$(now_ms)"
+  export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"healed\",\"pid\":4242,\"lastHealAtMs\":$((now - 30000))}"
+  run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ "$(jget status)" == "healed" ]] || die "cooldown blocked beacon: status=$(jget status)"
+}
+
+t_beacon_disabled_no_poll_stays_queued() {
+  beacon_env
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.disable"
+  run_heal
+  [[ "$(jget status)" == "disabled" ]] || die "status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled (would consume) while disabled"
+  grep -q "heal start" "$HEAL_LOG" && die "disabled tick relaunched" || true
+}
+
+t_beacon_second_request_escalates() {
+  beacon_env
+  local now; now="$(now_ms)"
+  export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"healed\",\"pid\":4242,\"lastHealAtMs\":$((now - 600000)),\"lastBeaconHealAtMs\":$((now - 600000))}"
+  run_heal
+  [[ "$(jget status)" == "beacon_suppressed" ]] || die "status=$(jget status)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  [[ "$(jget escalateHint)" == *"escalate"* ]] || die "no escalate hint"
+  grep -q "heal start" "$HEAL_LOG" && die "second beacon relaunched" || true
+  # outside the window a new outage is allowed again
+  seed_state "{\"version\":2,\"status\":\"healed\",\"pid\":4242,\"lastHealAtMs\":$((now - 7200000)),\"lastBeaconHealAtMs\":$((now - 7200000))}"
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "status=$(jget status) after window"
+}
+
+t_beacon_operator_request_wins() {
+  beacon_env
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  run_heal
+  [[ "$(jget reason)" == "operator_request" ]] || die "reason=$(jget reason)"
+}
+
 echo "kit $(cat "$ROOT/VERSION")  heal=$HEAL"
 run_case T-healthy t_healthy
 run_case T-disable t_disable
@@ -329,6 +433,15 @@ run_case T-ok-escalate-hint t_ok_escalate_hint
 run_case T-no-heartbeat-soft t_no_heartbeat_soft
 run_case T-stuck-flag-off t_stuck_flag_off
 run_case T-app-missing t_app_missing
+run_case T-beacon-heal t_beacon_heal
+run_case T-beacon-false-noop t_beacon_false_noop
+run_case T-beacon-bad-response-noop t_beacon_bad_response_noop
+run_case T-beacon-worker-down-noop t_beacon_worker_down_noop
+run_case T-beacon-unconfigured-no-poll t_beacon_unconfigured_no_poll
+run_case T-beacon-bypasses-cooldown t_beacon_bypasses_cooldown
+run_case T-beacon-disabled-stays-queued t_beacon_disabled_no_poll_stays_queued
+run_case T-beacon-second-request-escalates t_beacon_second_request_escalates
+run_case T-beacon-operator-request-wins t_beacon_operator_request_wins
 
 echo
 echo "passed=$PASS failed=$FAIL"

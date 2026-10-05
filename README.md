@@ -130,3 +130,7 @@ Cursor is not relaunched unless `HEAL_CURSOR=1`. The local-exec path is Grok Bot
 ## Risk
 
 If you quit Grok Bot on purpose, this agent brings it back unless the disable file is set. A relaunch can briefly bounce the Dock icon. Duplicate instances are mitigated by quit-first.
+
+## Optional: worker-beacon poll (unreleased, off by default)
+
+Set all three in the LaunchAgent environment to enable one outbound `POST /v1/poll` per tick: `BEACON_URL`, `BEACON_MACHINE_ID`, `BEACON_POLL_TOKEN_FILE` (a file outside this repo holding the poller bearer token). Worker source: [`worker-beacon/`](worker-beacon/). A pending request relaunches like `operator_request` with reason `beacon_request` and bypasses the 300s cooldown. `.disable` wins and skips the poll, so the request stays queued until its `exp`. A second beacon request inside `BEACON_RELAUNCH_WINDOW_SEC` (3600) of a beacon relaunch is not honored (`beacon_suppressed`, escalate). Worker unreachable or malformed reply: no-op. Not deployed, not proven live.
