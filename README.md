@@ -4,13 +4,13 @@ LaunchAgent that runs **on the Mac** and gently relaunches [Grok Bot](https://gr
 
 It does not need a cloud shell. Once the desktop link is gone, a remote agent cannot install or run this for you — it has to already be loaded.
 
-**Version:** see `VERSION` (current **1.4.1**).
+**Version:** see `VERSION` (current **1.4.2**).
 
-## 1.3.0 vs 1.4.0
+## 1.3.0 vs 1.4.x
 
-| | **1.3.0** | **1.4.0 (this tree, `VERSION`)** |
+| | **1.3.0** | **1.4.x (this tree, `VERSION`)** |
 |---|---|---|
-| Status | Shipped. LaunchAgent, tests, install. | Adds the worker-beacon heal-only inbox. Worker in [`worker-beacon/`](worker-beacon/) is deployed and live on the operator's personal Cloudflare (https://latch-worker-beacon.kadosh.workers.dev); optional Mac beacon poll hook is off by default. Prove C passed on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)). Prove D still open. |
+| Status | Shipped. LaunchAgent, tests, install. | Adds the worker-beacon heal-only inbox. Worker in [`worker-beacon/`](worker-beacon/) is deployed and live on the operator's personal Cloudflare (https://latch-worker-beacon.kadosh.workers.dev); optional Mac beacon poll hook is off by default. Prove C passed on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)); the live `.disable` check passed ([`docs/1.4.0/PROVE-DISABLE-2026-10-05.md`](docs/1.4.0/PROVE-DISABLE-2026-10-05.md)). Prove D still open. Every capability and its test: [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md). |
 | What it heals | Dead process, stale heartbeat, bad `bootOutcome`, frozen `heartbeatAtMs`, on-Mac `.request` file. | Same, **plus** the classes 1.3.0 cannot see — especially S-NEW-D. |
 | S-NEW-D | **Not auto-healed.** Moving heartbeat under 180s stays `ok` / `local_healthy`. `cloudConnectObservable` is always `false`. Long ok streak sets `escalateHint` only. | A heal-only beacon request relaunches Grok Bot (reason `beacon_request`). **Beacon path proven (Prove C).** Not proven against a real cloud disconnect with a moving heartbeat (Prove D). Nothing detects S-NEW-D by itself; a bot or operator must send the request. |
 | How S-NEW-D is seen | It cannot. | Prefer a native connection file written by Grok Bot so a bot does not have to declare the Mac down. 2026-10-02 dig found no such file. Last resort, now built: personal Cloudflare Worker, heal-request only, Mac outbound poll. Beacon bypasses the 300s cooldown. See [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md). |
@@ -37,7 +37,7 @@ Success (`status=healed`, `readiness=ready`) requires the process to be up **and
 - **S-NEW-D / silent disconnect:** `ListMachines.connected=false` in the cloud while this Mac still shows a live process and a **moving** heartbeat. The LaunchAgent cannot see cloud connect state (`cloudConnectObservable` is always false). A moving heartbeat under the stale threshold is treated as healthy on purpose — the 2026-10-02 incident was this case (heartbeat age about 31–45s, heal never fired).
 - Waking the display or repairing WAN.
 
-If `last.json` stays `status=ok` / `readiness=local_healthy` while the cloud link is down, restart Grok Bot yourself. After `OK_HINT_SEC` (default 300s) of continuous local health, `escalateHint` names S-NEW-D so morning triage is not an empty “healthy” with no caveat. A future fix needs a signal this kit does not have; **1.3.0 will not claim it**. The 1.4.0 section above is a proposal, not this LaunchAgent.
+If `last.json` stays `status=ok` / `readiness=local_healthy` while the cloud link is down, restart Grok Bot yourself. After `OK_HINT_SEC` (default 300s) of continuous local health, `escalateHint` names S-NEW-D so morning triage is not an empty “healthy” with no caveat. The LaunchAgent still cannot detect it. Since 1.4.0 a bot or operator that sees `ListMachines.connected=false` can POST a heal-request to the worker-beacon (see below), which relaunches Grok Bot; nothing auto-detects S-NEW-D, and a real-disconnect prove (Prove D) is still open.
 
 Someone **at the Mac** (or any path that can still write files there) can force one relaunch:
 
@@ -104,7 +104,7 @@ CI-safe fixtures (no live app, no `open`, no `osascript`):
 ./tests/run-tests.sh
 ```
 
-Covers healthy, disable, cooldown, readiness pass / incomplete / failed, operator request (including cooldown bypass), frozen heartbeat above and under `STUCK_SEC`, stale-vs-frozen priority, moving-heartbeat no-heal (S-NEW-D regression), long-ok escalate hint, and missing app.
+Covers healthy, disable, cooldown, readiness pass / incomplete / failed, operator request (including cooldown bypass), frozen heartbeat above and under `STUCK_SEC`, stale-vs-frozen priority, moving-heartbeat no-heal (S-NEW-D regression), long-ok escalate hint, missing app, and the kit/`VERSION` pin. It also covers the beacon poll hook (heal, no-op, bad reply, Worker down, unconfigured, cooldown bypass, `.disable` queued, one heal per outage, local-request precedence), token-file hygiene (0640/0644 refuse, 0600/0400 poll, perms-unknown fails closed, quote refused), and `install.sh` env preservation (temp `HOME`, launchd skipped). Worker: `cd worker-beacon && npm test`. The full capability-to-test map is [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md).
 
 Live prove — **quits Grok Bot.app** — only on macOS, only when you set `LIVE=1`, and only after 1.3.0 is installed:
 

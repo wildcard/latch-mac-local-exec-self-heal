@@ -1,5 +1,5 @@
 #!/bin/bash
-# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.1 (+ optional worker-beacon poll).
+# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.2 (+ optional worker-beacon poll).
 # Runs on the Mac without cloud connectivity.
 # Relaunches Grok Bot.app when the desktop process is down, the dune-reliability
 # heartbeat is stale, bootOutcome is not ready, the heartbeat timestamp is frozen,
@@ -14,7 +14,7 @@
 # Set HEAL_CURSOR=1 to also ensure Cursor.app is up.
 set -euo pipefail
 
-KIT_VERSION="1.4.1"
+KIT_VERSION="1.4.2"
 APP_NAME="Grok Bot"
 APP_PATH="${GROK_APP_PATH:-/Applications/Grok Bot.app}"
 SUP="${GROK_SUPPORT_DIR:-$HOME/Library/Application Support/Grok Bot}"
@@ -354,16 +354,38 @@ PY
   BOOT="${R_BOOT:-}"
 }
 
+# Prints the octal permission bits of $1 (3-4 digits), or nothing if they cannot be determined.
+# stat flavour is chosen by OS: BSD/macOS `stat -f %Lp`; GNU `stat -c %a` (on GNU, `stat -f` is a
+# filesystem stat that exits 0 with junk, which used to fail the check open). Output is validated
+# strictly, then a python fallback is tried. BEACON_TEST_NO_PY_PERMS=1 disables the fallback (tests only).
+token_file_mode() {
+  local f="$1" m=""
+  case "$(uname -s 2>/dev/null)" in
+    Darwin|*BSD) m="$(stat -f %Lp "$f" 2>/dev/null || true)" ;;
+    *) m="$(stat -c %a "$f" 2>/dev/null || true)" ;;
+  esac
+  if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
+  if [[ "${BEACON_TEST_NO_PY_PERMS:-0}" != "1" ]]; then
+    m="$("$PYTHON" -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$f" 2>/dev/null || true)"
+    if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
+  fi
+  return 0
+}
+
 # Sets BEACON_PENDING=1 only when the Worker returns exactly {"heal":true} (boolean true, sole key).
 # Any failure is a no-op: a dead Worker must never block or trigger local heal.
 beacon_poll() {
   BEACON_PENDING=0
   [[ -n "$BEACON_URL" && -n "$BEACON_POLL_TOKEN_FILE" && -n "$BEACON_MACHINE_ID" ]] || return 0
   [[ -r "$BEACON_POLL_TOKEN_FILE" ]] || { log "beacon: token file unreadable"; return 0; }
-  # Refuse group/world-readable token files (macOS/Linux octal mode).
+  # Refuse group/world-readable token files. Fail closed: unknown mode means no poll.
   local perms
-  perms="$(stat -f %Lp "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || stat -c %a "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || echo "")"
-  if [[ -n "$perms" ]] && (( (8#$perms & 077) != 0 )); then
+  perms="$(token_file_mode "$BEACON_POLL_TOKEN_FILE")"
+  if [[ -z "$perms" ]]; then
+    log "beacon: token file perms unknown; refuse"
+    return 0
+  fi
+  if (( (8#$perms & 077) != 0 )); then
     log "beacon: token file perms too open ($perms); want 600 or tighter"
     return 0
   fi

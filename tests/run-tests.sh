@@ -99,7 +99,7 @@ t_healthy() {
   [[ "$(jget readiness)" == "local_healthy" ]] || die "readiness=$(jget readiness)"
   [[ "$(jget escalateHint)" == "None" ]] || die "hint=$(jget escalateHint)"
   [[ "$(jget pid)" == "4242" ]] || die "pid=$(jget pid)"
-  [[ "$(jget kitVersion)" == "1.4.1" ]] || die "kit=$(jget kitVersion)"
+  [[ "$(jget kitVersion)" == "1.4.2" ]] || die "kit=$(jget kitVersion)"
   [[ "$(jget lastHealAtMs)" == "None" ]] || die "unexpected heal stamp"
   grep -q "heal start" "$HEAL_LOG" && die "healthy tick relaunched" || true
 }
@@ -422,7 +422,7 @@ t_kit_version_matches() {
   local ver kit
   ver="$(tr -d '[:space:]' < "$ROOT/VERSION")"
   kit="$(grep -E '^KIT_VERSION=' "$HEAL" | head -1 | sed -E 's/^KIT_VERSION="//; s/"$//')"
-  [[ "$ver" == "1.4.1" ]] || die "VERSION=$ver"
+  [[ "$ver" == "1.4.2" ]] || die "VERSION=$ver"
   [[ "$kit" == "$ver" ]] || die "KIT_VERSION=$kit VERSION=$ver"
 }
 
@@ -445,6 +445,56 @@ t_beacon_token_world_readable_refuses() {
   [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
   [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled with world-readable token"
   grep -q "perms too open" "$HEAL_LOG" || die "missing perms log"
+}
+
+t_beacon_token_group_readable_refuses() {
+  beacon_env
+  chmod 640 "$BEACON_POLL_TOKEN_FILE"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled with group-readable token"
+  grep -q "perms too open (640)" "$HEAL_LOG" || die "missing perms log"
+}
+
+t_beacon_token_0400_polls() {
+  beacon_env
+  chmod 400 "$BEACON_POLL_TOKEN_FILE"
+  run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ -s "$BEACON_STUB_CALLS" ]] || die "did not poll with 0400 token"
+}
+
+t_beacon_token_0600_polls() {
+  beacon_env
+  chmod 600 "$BEACON_POLL_TOKEN_FILE"
+  run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ -s "$BEACON_STUB_CALLS" ]] || die "did not poll with 0600 token"
+  ! grep -q "fake-poll-token-for-tests" "$HEAL_LOG" || die "token leaked into log"
+}
+
+# A junk `stat` (GNU-style `stat -f` output) plus the test-only BEACON_TEST_NO_PY_PERMS hook that
+# disables the python fallback: mode cannot be determined, so the poll must be refused (fail closed).
+t_beacon_token_perms_unknown_refuses() {
+  beacon_env
+  mkdir -p "$TMP/shim"
+  printf '#!/bin/sh\necho "  File: junk"\necho "    ID: 0 Namelen: 255"\nexit 0\n' > "$TMP/shim/stat"
+  chmod 755 "$TMP/shim/stat"
+  PATH="$TMP/shim:$PATH" BEACON_TEST_NO_PY_PERMS=1 run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled with unknown perms"
+  grep -q "perms unknown; refuse" "$HEAL_LOG" || die "missing perms unknown log"
+}
+
+# Same junk stat but python fallback enabled: mode is recovered, 0600 still polls.
+t_beacon_token_junk_stat_python_fallback_polls() {
+  beacon_env
+  mkdir -p "$TMP/shim"
+  printf '#!/bin/sh\necho "  File: junk"\nexit 0\n' > "$TMP/shim/stat"
+  chmod 755 "$TMP/shim/stat"
+  PATH="$TMP/shim:$PATH" run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ -s "$BEACON_STUB_CALLS" ]] || die "did not poll via python fallback"
 }
 
 t_beacon_token_quote_refuses() {
@@ -573,6 +623,11 @@ run_case T-beacon-second-request-escalates t_beacon_second_request_escalates
 run_case T-beacon-operator-request-wins t_beacon_operator_request_wins
 run_case T-beacon-skip-poll-local-cooldown t_beacon_skip_poll_when_local_heal_cooldown
 run_case T-beacon-token-world-readable t_beacon_token_world_readable_refuses
+run_case T-beacon-token-group-readable t_beacon_token_group_readable_refuses
+run_case T-beacon-token-0400-polls t_beacon_token_0400_polls
+run_case T-beacon-token-0600-polls t_beacon_token_0600_polls
+run_case T-beacon-token-perms-unknown-refuses t_beacon_token_perms_unknown_refuses
+run_case T-beacon-token-junk-stat-python-fallback t_beacon_token_junk_stat_python_fallback_polls
 run_case T-beacon-token-quote-refuses t_beacon_token_quote_refuses
 run_case T-install-preserves-beacon-env t_install_preserves_beacon_env
 run_case T-install-fresh t_install_fresh

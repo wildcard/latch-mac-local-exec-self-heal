@@ -1,5 +1,13 @@
 # Latch mac-local-exec-self-heal
 
+## 1.4.2 — 2026-10-05
+
+- Token-permission check in the beacon poll is now portable and fails closed. The old `stat -f %Lp || stat -c %a` form failed open on GNU/Linux, where `stat -f` is a filesystem stat that exits 0 with junk, so a 0644 token was still used. Now `token_file_mode` picks the stat flavour by OS, validates the result as 3-4 octal digits, falls back to python, and the poll is refused (`beacon: token file perms unknown; refuse`) when the mode cannot be determined. Group/world-readable still refuses with the existing log text. 0600 and 0400 poll as before. The token is never logged.
+- New tests: `T-beacon-token-group-readable`, `T-beacon-token-0400-polls`, `T-beacon-token-0600-polls`, `T-beacon-token-perms-unknown-refuses`, `T-beacon-token-junk-stat-python-fallback`. `BEACON_TEST_NO_PY_PERMS=1` is a test-only hook that disables the python fallback.
+- `docs/CAPABILITY-CHECKS.md`: every capability mapped to its test, live proof and honest status.
+- `docs/1.4.0/PROVE-DISABLE-2026-10-05.md`: live record that `.disable` wins over a beacon heal-request (PASS).
+- Stale docs fixed (README, PRODUCT-BAR, worker-beacon README). Prove D remains open; a live beacon heal on 1.4.1+ is not yet done.
+
 ## 1.4.1 — 2026-10-05
 
 - `install.sh` no longer wipes operator-set LaunchAgent `EnvironmentVariables` on reinstall. Operator tunables (`BEACON_*`, `HEAL_CURSOR`, `COOLDOWN_SEC`, `STUCK_SEC`, `HEARTBEAT_STALE_SEC`, `READINESS_WAIT_SEC`, `OK_HINT_SEC`, `HEAL_ON_STUCK_SESSION`, and any other custom string keys) win over template defaults; kit-owned `PATH` comes from the template. `INSTALL_RESET_ENV=1` deliberately wipes back to the template. Only what is already on disk is preserved; nothing secret is stored in git.
@@ -22,7 +30,7 @@ Worker-beacon heal-only inbox: a Cloudflare Worker plus an optional Mac poll hoo
 - Decision locks 2026-10-05: while `.disable` is present a beacon heal-request stays queued and disable still blocks relaunch; one beacon relaunch per outage then stop and escalate; auth v1 is Bearer tokens (HMAC documented alternative).
 - `worker-beacon/`: heal-only inbox Worker (strict `heal_request` schema, single-use `jti`, `exp` <=120s, per-machine Durable Object, 1/5min and 3/hour limit) with unit tests. Deployed and live on the operator's personal Cloudflare at https://latch-worker-beacon.kadosh.workers.dev. Tokens are Worker secrets plus a token file outside the repo; none are in git. No account id in the repo.
 - Heal script: optional outbound beacon poll once per tick (`BEACON_URL`, `BEACON_POLL_TOKEN_FILE`, `BEACON_MACHINE_ID`), off unless configured. Distinct reason `beacon_request`. Fixture tests plus the live Prove C below.
-- **Prove C: PASS** on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)). A heal request POSTed from a remote box (not by creating the local `.request` file) relaunched Grok Bot with reason `beacon_request`: old pid replaced, `status=healed`, `readiness=ready`. Bad requests (missing `exp`, expired, unsupported action) were each rejected with 400; a replayed `jti` got 409 and a second accept inside 5 minutes got 429. This is **not** Prove D. S-NEW-D under a real cloud disconnect with a moving heartbeat is still unproven. Not done: Prove D; the optional live `.disable`-blocks-beacon check.
+- **Prove C: PASS** on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)). A heal request POSTed from a remote box (not by creating the local `.request` file) relaunched Grok Bot with reason `beacon_request`: old pid replaced, `status=healed`, `readiness=ready`. Bad requests (missing `exp`, expired, unsupported action) were each rejected with 400; a replayed `jti` got 409 and a second accept inside 5 minutes got 429. This is **not** Prove D. S-NEW-D under a real cloud disconnect with a moving heartbeat is still unproven. Not done: Prove D. The live `.disable`-blocks-beacon check later passed 2026-10-05 ([`docs/1.4.0/PROVE-DISABLE-2026-10-05.md`](docs/1.4.0/PROVE-DISABLE-2026-10-05.md)).
 - `.gitignore`: `.wrangler/` and `node_modules/`.
 - Follow-up on `feat/worker-beacon-inbox`: `KIT_VERSION` stamped 1.4.0; poll skipped when a local heal is already needed (avoids consuming a beacon request into cooldown); token file must not be group/world-readable and must not contain `"`/`\`; poll accepts only `{"heal":true}`; Worker index + `timingSafeEqual` covered by tests; poll unknown-machine status aligned to 403.
 
