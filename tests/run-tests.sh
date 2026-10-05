@@ -99,7 +99,7 @@ t_healthy() {
   [[ "$(jget readiness)" == "local_healthy" ]] || die "readiness=$(jget readiness)"
   [[ "$(jget escalateHint)" == "None" ]] || die "hint=$(jget escalateHint)"
   [[ "$(jget pid)" == "4242" ]] || die "pid=$(jget pid)"
-  [[ "$(jget kitVersion)" == "1.4.0" ]] || die "kit=$(jget kitVersion)"
+  [[ "$(jget kitVersion)" == "1.4.1" ]] || die "kit=$(jget kitVersion)"
   [[ "$(jget lastHealAtMs)" == "None" ]] || die "unexpected heal stamp"
   grep -q "heal start" "$HEAL_LOG" && die "healthy tick relaunched" || true
 }
@@ -422,7 +422,7 @@ t_kit_version_matches() {
   local ver kit
   ver="$(tr -d '[:space:]' < "$ROOT/VERSION")"
   kit="$(grep -E '^KIT_VERSION=' "$HEAL" | head -1 | sed -E 's/^KIT_VERSION="//; s/"$//')"
-  [[ "$ver" == "1.4.0" ]] || die "VERSION=$ver"
+  [[ "$ver" == "1.4.1" ]] || die "VERSION=$ver"
   [[ "$kit" == "$ver" ]] || die "KIT_VERSION=$kit VERSION=$ver"
 }
 
@@ -458,6 +458,41 @@ t_beacon_token_quote_refuses() {
 }
 
 echo "kit $(cat "$ROOT/VERSION")  heal=$HEAL"
+t_install_env_check() {
+  python3 - "$1" "$2" <<'PY'
+import plistlib, sys
+env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
+want = dict(kv.split("=", 1) for kv in sys.argv[2].split(";") if kv)
+for k, v in want.items():
+    assert env.get(k) == v, (k, env.get(k))
+PY
+}
+
+t_install_preserves_beacon_env() {
+  local home="$TMP/home"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
+  mkdir -p "$home/Library/LaunchAgents"
+  python3 - "$pl" <<'PY'
+import plistlib, sys
+plistlib.dump({"Label": "x", "EnvironmentVariables": {
+    "BEACON_URL": "https://example.invalid", "BEACON_POLL_TOKEN_FILE": "/nonexistent/tok",
+    "BEACON_MACHINE_ID": "fixture-machine", "MY_CUSTOM": "1", "COOLDOWN_SEC": "999"}},
+    open(sys.argv[1], "wb"))
+PY
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "install failed"
+  t_install_env_check "$pl" "BEACON_URL=https://example.invalid;BEACON_POLL_TOKEN_FILE=/nonexistent/tok;BEACON_MACHINE_ID=fixture-machine;MY_CUSTOM=1;COOLDOWN_SEC=300;STUCK_SEC=120" \
+    || die "env not preserved or template key lost"
+  # idempotent on a second run
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "reinstall failed"
+  t_install_env_check "$pl" "BEACON_URL=https://example.invalid;MY_CUSTOM=1" || die "second run lost env"
+}
+
+t_install_fresh() {
+  local home="$TMP/home2"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
+  mkdir -p "$home"
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "fresh install failed"
+  t_install_env_check "$pl" "COOLDOWN_SEC=300" || die "fresh plist wrong"
+}
+
 run_case T-healthy t_healthy
 run_case T-disable t_disable
 run_case T-cooldown t_cooldown
@@ -487,6 +522,8 @@ run_case T-beacon-operator-request-wins t_beacon_operator_request_wins
 run_case T-beacon-skip-poll-local-cooldown t_beacon_skip_poll_when_local_heal_cooldown
 run_case T-beacon-token-world-readable t_beacon_token_world_readable_refuses
 run_case T-beacon-token-quote-refuses t_beacon_token_quote_refuses
+run_case T-install-preserves-beacon-env t_install_preserves_beacon_env
+run_case T-install-fresh t_install_fresh
 
 echo
 echo "passed=$PASS failed=$FAIL"

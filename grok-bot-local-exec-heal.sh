@@ -1,5 +1,5 @@
 #!/bin/bash
-# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.0 (+ optional worker-beacon poll).
+# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.1 (+ optional worker-beacon poll).
 # Runs on the Mac without cloud connectivity.
 # Relaunches Grok Bot.app when the desktop process is down, the dune-reliability
 # heartbeat is stale, bootOutcome is not ready, the heartbeat timestamp is frozen,
@@ -14,7 +14,7 @@
 # Set HEAL_CURSOR=1 to also ensure Cursor.app is up.
 set -euo pipefail
 
-KIT_VERSION="1.4.0"
+KIT_VERSION="1.4.1"
 APP_NAME="Grok Bot"
 APP_PATH="${GROK_APP_PATH:-/Applications/Grok Bot.app}"
 SUP="${GROK_SUPPORT_DIR:-$HOME/Library/Application Support/Grok Bot}"

@@ -1,5 +1,12 @@
 # Latch mac-local-exec-self-heal
 
+## 1.4.1 — 2026-10-05
+
+- `install.sh` no longer wipes operator-set LaunchAgent `EnvironmentVariables` on reinstall. `BEACON_URL`, `BEACON_POLL_TOKEN_FILE`, `BEACON_MACHINE_ID` and any other custom string keys already in the installed plist are merged back; template keys win on conflict. Only what is already on disk is preserved; nothing secret is stored in git.
+- `install.sh` waits and retries `launchctl bootstrap` (up to 5 tries) after `bootout`, fixing the intermittent `Bootstrap failed: 5: Input/output error` race that aborted the install before kickstart.
+- `INSTALL_SKIP_LAUNCHD=1` (tests only) writes files and exits without touching launchd or running a heal. Two hermetic tests cover preserve and fresh install.
+- `KIT_VERSION`, `VERSION` and fixture pins bumped to 1.4.1.
+
 ## 1.4.0 — 2026-10-05
 
 Worker-beacon heal-only inbox: a Cloudflare Worker plus an optional Mac poll hook. Prove C passed on the beacon path. Prove D (a real cloud disconnect while the heartbeat is still moving) is still open.
