@@ -15,7 +15,14 @@ SCRIPT_DST="$BIN_DIR/grok-bot-local-exec-heal.sh"
 PLIST_DST="$LAUNCH_DIR/${LABEL}.plist"
 VERSION_FILE="$ROOT/VERSION"
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
+# INSTALL_SKIP_LAUNCHD=1 is for hermetic tests only: write files, touch no LaunchAgent, run no heal.
+# Also skips the Darwin-only gate so merge/plist logic can be exercised on Linux CI.
+SKIP_LAUNCHD=0
+if [[ "${INSTALL_SKIP_LAUNCHD:-0}" == "1" ]]; then
+  SKIP_LAUNCHD=1
+fi
+
+if [[ "$(uname -s)" != "Darwin" && "$SKIP_LAUNCHD" != "1" ]]; then
   echo "This installer is macOS-only." >&2
   exit 1
 fi
@@ -25,47 +32,105 @@ if [[ ! -f "$PLIST_TMPL" ]]; then
   exit 1
 fi
 
-if [[ ! -d "/Applications/Grok Bot.app" ]]; then
+PYTHON="${PYTHON:-/usr/bin/python3}"
+if [[ ! -x "$PYTHON" ]]; then
+  PYTHON="$(command -v python3 || true)"
+fi
+if [[ -z "${PYTHON}" || ! -x "$PYTHON" ]]; then
+  echo "python3 is required for plist merge/lint." >&2
+  exit 1
+fi
+
+if [[ "$SKIP_LAUNCHD" != "1" && ! -d "/Applications/Grok Bot.app" ]]; then
   echo "Warning: /Applications/Grok Bot.app not found. Install Grok Bot first; heal will no-op until it exists." >&2
 fi
 
 mkdir -p "$BIN_DIR" "$LAUNCH_DIR" "$LOG_DIR" "$HOME_DIR/Library/Application Support/Latch"
 install -m 755 "$SCRIPT_SRC" "$SCRIPT_DST"
 
-# Keep operator-set EnvironmentVariables (BEACON_* and any other custom keys) across reinstalls.
-# Template keys win on conflict; only keys the template does not define are carried over.
+# Keep operator-set EnvironmentVariables across reinstalls.
+# Operator tunables (HEAL_*, *SEC, BEACON_*, custom keys) win over template defaults.
+# Kit-owned PATH comes from the template unless INSTALL_RESET_ENV=1 (full wipe to template).
+# Merge into a temp file in LAUNCH_DIR, lint, then mv into place. Merge failure leaves
+# the existing plist untouched and exits non-zero before any launchctl bootstrap.
+NEW_PLIST="$(mktemp "${LAUNCH_DIR}/${LABEL}.plist.new.XXXXXX")"
 OLD_PLIST=""
-if [[ -f "$PLIST_DST" ]]; then
-  OLD_PLIST="$(mktemp)"
+cleanup_install_temps() {
+  [[ -n "${NEW_PLIST:-}" ]] && rm -f "$NEW_PLIST"
+  [[ -n "${OLD_PLIST:-}" ]] && rm -f "$OLD_PLIST"
+  return 0
+}
+trap cleanup_install_temps EXIT
+
+sed "s|__HOME__|$HOME_DIR|g" "$PLIST_TMPL" > "$NEW_PLIST"
+
+if [[ -f "$PLIST_DST" && "${INSTALL_RESET_ENV:-0}" != "1" ]]; then
+  OLD_PLIST="$(mktemp "${LAUNCH_DIR}/${LABEL}.plist.old.XXXXXX")"
   cp "$PLIST_DST" "$OLD_PLIST"
-fi
-sed "s|__HOME__|$HOME_DIR|g" "$PLIST_TMPL" > "$PLIST_DST"
-if [[ -n "$OLD_PLIST" ]]; then
-  /usr/bin/python3 - "$OLD_PLIST" "$PLIST_DST" <<'PY' || echo "Warning: could not merge previous plist env; custom env not preserved." >&2
-import plistlib, sys
+  # INSTALL_TEST_MERGE_FAIL=1 is for hermetic tests only: force the merge step to fail.
+  if ! "$PYTHON" - "$OLD_PLIST" "$NEW_PLIST" <<'PY'
+import os, plistlib, sys
+
+if os.environ.get("INSTALL_TEST_MERGE_FAIL") == "1":
+    sys.exit(1)
+
+# PATH is kit-owned (template wins). All other string keys from the existing plist
+# are preserved over template defaults: documented tunables (HEAL_CURSOR, *SEC,
+# HEAL_ON_STUCK_SESSION, BEACON_*), plus any custom operator keys.
+# Set INSTALL_RESET_ENV=1 to wipe back to the template.
+KIT_OWNED = {"PATH"}
+
 old_path, new_path = sys.argv[1], sys.argv[2]
 try:
     with open(old_path, "rb") as f:
         old_env = plistlib.load(f).get("EnvironmentVariables") or {}
 except Exception:
     sys.exit(0)  # unreadable old plist: nothing to preserve
+
 with open(new_path, "rb") as f:
     new = plistlib.load(f)
 env = new.setdefault("EnvironmentVariables", {})
-kept = [k for k, v in old_env.items() if k not in env and isinstance(v, str)]
-for k in kept:
-    env[k] = old_env[k]
+
+kept = []
+for k, v in old_env.items():
+    if not isinstance(v, str) or k in KIT_OWNED:
+        continue
+    if env.get(k) != v:
+        env[k] = v
+        kept.append(k)
+
 with open(new_path, "wb") as f:
     plistlib.dump(new, f)
 if kept:
-    print("Preserved custom env from existing plist: " + ", ".join(sorted(kept)))
+    print("Preserved operator env from existing plist: " + ", ".join(sorted(kept)))
 PY
-  rm -f "$OLD_PLIST"
+  then
+    echo "Error: could not merge previous plist EnvironmentVariables; existing LaunchAgent plist left unchanged." >&2
+    exit 1
+  fi
 fi
-chmod 644 "$PLIST_DST"
 
-# INSTALL_SKIP_LAUNCHD=1 is for hermetic tests only: write files, touch no LaunchAgent, run no heal.
-if [[ "${INSTALL_SKIP_LAUNCHD:-0}" == "1" ]]; then
+# Lint before replace (plutil on macOS; python load elsewhere / when plutil missing).
+if command -v plutil >/dev/null 2>&1; then
+  if ! plutil -lint "$NEW_PLIST" >/dev/null; then
+    echo "Error: new plist failed plutil -lint; existing LaunchAgent plist left unchanged." >&2
+    exit 1
+  fi
+else
+  if ! "$PYTHON" -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$NEW_PLIST"; then
+    echo "Error: new plist failed python lint; existing LaunchAgent plist left unchanged." >&2
+    exit 1
+  fi
+fi
+
+mv "$NEW_PLIST" "$PLIST_DST"
+NEW_PLIST=""
+chmod 644 "$PLIST_DST"
+if [[ -n "${OLD_PLIST:-}" ]]; then rm -f "$OLD_PLIST"; fi
+OLD_PLIST=""
+trap - EXIT
+
+if [[ "$SKIP_LAUNCHD" == "1" ]]; then
   echo "INSTALL_SKIP_LAUNCHD=1: files written, launchd untouched."
   exit 0
 fi
@@ -80,12 +145,17 @@ for attempt in 1 2 3 4 5; do
     BOOT_OK=1
     break
   fi
-  echo "bootstrap attempt ${attempt} failed; retrying..." >&2
-  launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
-  sleep 2
+  if [[ "$attempt" -lt 5 ]]; then
+    echo "bootstrap attempt ${attempt} failed; retrying..." >&2
+    launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
+    sleep 2
+  else
+    echo "bootstrap attempt ${attempt} failed." >&2
+  fi
 done
 if [[ "$BOOT_OK" != "1" ]]; then
   echo "launchctl bootstrap failed after retries." >&2
+  echo "Recovery: launchctl bootstrap \"gui/${UID_NUM}\" \"$PLIST_DST\"" >&2
   exit 5
 fi
 launchctl enable "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true

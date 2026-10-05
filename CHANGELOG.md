@@ -2,9 +2,11 @@
 
 ## 1.4.1 — 2026-10-05
 
-- `install.sh` no longer wipes operator-set LaunchAgent `EnvironmentVariables` on reinstall. `BEACON_URL`, `BEACON_POLL_TOKEN_FILE`, `BEACON_MACHINE_ID` and any other custom string keys already in the installed plist are merged back; template keys win on conflict. Only what is already on disk is preserved; nothing secret is stored in git.
-- `install.sh` waits and retries `launchctl bootstrap` (up to 5 tries) after `bootout`, fixing the intermittent `Bootstrap failed: 5: Input/output error` race that aborted the install before kickstart.
-- `INSTALL_SKIP_LAUNCHD=1` (tests only) writes files and exits without touching launchd or running a heal. Two hermetic tests cover preserve and fresh install.
+- `install.sh` no longer wipes operator-set LaunchAgent `EnvironmentVariables` on reinstall. Operator tunables (`BEACON_*`, `HEAL_CURSOR`, `COOLDOWN_SEC`, `STUCK_SEC`, `HEARTBEAT_STALE_SEC`, `READINESS_WAIT_SEC`, `OK_HINT_SEC`, `HEAL_ON_STUCK_SESSION`, and any other custom string keys) win over template defaults; kit-owned `PATH` comes from the template. `INSTALL_RESET_ENV=1` deliberately wipes back to the template. Only what is already on disk is preserved; nothing secret is stored in git.
+- Plist replace is atomic (temp in LaunchAgents dir → lint → `mv`). Merge failure is fail-loud: existing plist left unchanged, non-zero exit before any `launchctl bootstrap`.
+- `install.sh` waits and retries `launchctl bootstrap` (up to 5 tries) after `bootout`, fixing the intermittent `Bootstrap failed: 5: Input/output error` race; prints a recovery `bootstrap` command on final failure and skips the extra sleep/bootout after the last attempt.
+- `INSTALL_SKIP_LAUNCHD=1` (tests only) writes files and exits without touching launchd or running a heal; also skips the Darwin-only gate so hermetic install tests run on Linux CI. Do not leave it exported in a shell profile.
+- Hermetic tests cover preserve (incl. ProgramArguments + tunable keep), fresh install, merge-failure abort, and `INSTALL_RESET_ENV`.
 - `KIT_VERSION`, `VERSION` and fixture pins bumped to 1.4.1.
 
 ## 1.4.0 — 2026-10-05

@@ -475,15 +475,67 @@ t_install_preserves_beacon_env() {
 import plistlib, sys
 plistlib.dump({"Label": "x", "EnvironmentVariables": {
     "BEACON_URL": "https://example.invalid", "BEACON_POLL_TOKEN_FILE": "/nonexistent/tok",
-    "BEACON_MACHINE_ID": "fixture-machine", "MY_CUSTOM": "1", "COOLDOWN_SEC": "999"}},
+    "BEACON_MACHINE_ID": "fixture-machine", "MY_CUSTOM": "1", "COOLDOWN_SEC": "999",
+    "HEAL_CURSOR": "1", "PATH": "/opt/custom/bin:/usr/bin:/bin"}},
     open(sys.argv[1], "wb"))
 PY
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "install failed"
-  t_install_env_check "$pl" "BEACON_URL=https://example.invalid;BEACON_POLL_TOKEN_FILE=/nonexistent/tok;BEACON_MACHINE_ID=fixture-machine;MY_CUSTOM=1;COOLDOWN_SEC=300;STUCK_SEC=120" \
+  # Operator tunables + BEACON_* + custom survive; kit-owned PATH comes from template; missing STUCK_SEC from template.
+  t_install_env_check "$pl" "BEACON_URL=https://example.invalid;BEACON_POLL_TOKEN_FILE=/nonexistent/tok;BEACON_MACHINE_ID=fixture-machine;MY_CUSTOM=1;COOLDOWN_SEC=999;HEAL_CURSOR=1;STUCK_SEC=120;PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
     || die "env not preserved or template key lost"
+  python3 - "$pl" "$home" <<'PY' || die "ProgramArguments not updated from template"
+import plistlib, sys
+pl = plistlib.load(open(sys.argv[1], "rb"))
+home = sys.argv[2]
+args = pl.get("ProgramArguments") or []
+want = f"{home}/Library/Application Support/Latch/bin/grok-bot-local-exec-heal.sh"
+assert args == ["/bin/bash", want], args
+assert pl.get("Label") == "com.latch.grok-bot-local-exec-heal", pl.get("Label")
+PY
   # idempotent on a second run
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "reinstall failed"
-  t_install_env_check "$pl" "BEACON_URL=https://example.invalid;MY_CUSTOM=1" || die "second run lost env"
+  t_install_env_check "$pl" "BEACON_URL=https://example.invalid;MY_CUSTOM=1;COOLDOWN_SEC=999;HEAL_CURSOR=1" || die "second run lost env"
+}
+
+t_install_reset_env() {
+  local home="$TMP/home-reset"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
+  mkdir -p "$home/Library/LaunchAgents"
+  python3 - "$pl" <<'PY'
+import plistlib, sys
+plistlib.dump({"Label": "x", "EnvironmentVariables": {
+    "BEACON_URL": "https://wipe.example.invalid", "COOLDOWN_SEC": "999", "HEAL_CURSOR": "1"}},
+    open(sys.argv[1], "wb"))
+PY
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 INSTALL_RESET_ENV=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "reset install failed"
+  python3 - "$pl" <<'PY' || die "INSTALL_RESET_ENV did not wipe operator env"
+import plistlib, sys
+env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
+assert "BEACON_URL" not in env, env
+assert env.get("COOLDOWN_SEC") == "300", env.get("COOLDOWN_SEC")
+assert env.get("HEAL_CURSOR") == "0", env.get("HEAL_CURSOR")
+PY
+}
+
+t_install_merge_fail_aborts() {
+  local home="$TMP/home-merge-fail"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
+  mkdir -p "$home/Library/LaunchAgents"
+  python3 - "$pl" <<'PY'
+import plistlib, sys
+plistlib.dump({"Label": "keep-me", "EnvironmentVariables": {
+    "BEACON_URL": "https://keep.example.invalid", "BEACON_MACHINE_ID": "keep-machine",
+    "MY_CUSTOM": "stay"}}, open(sys.argv[1], "wb"))
+PY
+  if HOME="$home" INSTALL_SKIP_LAUNCHD=1 INSTALL_TEST_MERGE_FAIL=1 bash "$ROOT/install.sh" >/dev/null 2>&1; then
+    die "merge-fail install should have exited non-zero"
+  fi
+  t_install_env_check "$pl" "BEACON_URL=https://keep.example.invalid;BEACON_MACHINE_ID=keep-machine;MY_CUSTOM=stay" \
+    || die "merge fail wiped BEACON env"
+  python3 - "$pl" <<'PY' || die "merge fail replaced plist"
+import plistlib, sys
+pl = plistlib.load(open(sys.argv[1], "rb"))
+assert pl.get("Label") == "keep-me", pl.get("Label")
+assert "STUCK_SEC" not in (pl.get("EnvironmentVariables") or {}), "template leaked after failed merge"
+PY
 }
 
 t_install_fresh() {
@@ -524,6 +576,8 @@ run_case T-beacon-token-world-readable t_beacon_token_world_readable_refuses
 run_case T-beacon-token-quote-refuses t_beacon_token_quote_refuses
 run_case T-install-preserves-beacon-env t_install_preserves_beacon_env
 run_case T-install-fresh t_install_fresh
+run_case T-install-merge-fail-aborts t_install_merge_fail_aborts
+run_case T-install-reset-env t_install_reset_env
 
 echo
 echo "passed=$PASS failed=$FAIL"
