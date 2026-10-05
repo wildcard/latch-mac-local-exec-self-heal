@@ -1,19 +1,20 @@
 # Latch mac-local-exec-self-heal
 
-## Unreleased — 1.4.0 (proposed, not shipped)
+## 1.4.0 — 2026-10-05
 
-**`VERSION` remains 1.3.0.** Worker source and Mac poll hook added, **not deployed, not proven live**. S-NEW-D is **not** auto-healed by the LaunchAgent in this tree.
+Worker-beacon heal-only inbox: a Cloudflare Worker plus an optional Mac poll hook. Prove C passed on the beacon path. Prove D (a real cloud disconnect while the heartbeat is still moving) is still open.
 
 - Proposal and research under `docs/1.4.0/` (beacon spec, Mac exposure dig, 1.3.0 prove record, pre-1.3 gap spec).
 - Product bar (`docs/PRODUCT-BAR.md`): catch every `ListMachines.connected=false` class, including S-NEW-D; the only fix is restarting Grok Bot; Worker heal-only inbox is last resort; prefer a native Mac connection file so bots need not declare the machine down.
-- Decision locks recorded, not built: Worker inbox is the default beacon transport; a beacon heal-request bypasses the 300s cooldown the same way the local `.request` file does.
+- Decision locks: Worker inbox is the default beacon transport; a beacon heal-request bypasses the 300s cooldown the same way the local `.request` file does.
 - Research fold-in: no on-disk or localhost signal mirrored `ListMachines.connected` on 2026-10-02. Named `local-exec-*-connection` files were source strings only. Do not lower stale or frozen thresholds to fake a fix.
 - Connection-signal research (`docs/1.4.0/RESEARCH-GROK-BOT-CONNECTION-20261002.md`): public docs and the 0.66.0 dig still show no LaunchAgent-usable mirror of `ListMachines.connected`. Do not scrape credential JSON or treat a missing daemon file as disconnected.
-- Self-heal modes matrix (`docs/1.4.0/SELF-HEAL-MODES.md`, ~11:35 PM PT bar): none / mac-local / worker-beacon / vitals-buddy; deploy-time multi-mode pack. Product bar and tasks updated. No Worker or buddy code.
+- Self-heal modes matrix (`docs/1.4.0/SELF-HEAL-MODES.md`): none / mac-local / worker-beacon / vitals-buddy; deploy-time multi-mode pack. vitals-buddy is not built.
 - Decision locks 2026-10-05: while `.disable` is present a beacon heal-request stays queued and disable still blocks relaunch; one beacon relaunch per outage then stop and escalate; auth v1 is Bearer tokens (HMAC documented alternative).
-- `worker-beacon/`: heal-only inbox Worker source (strict `heal_request` schema, single-use `jti`, `exp` ≤120s, per-machine Durable Object, 1/5min and 3/hour limit) with unit tests. No account id, no secrets. Not deployed.
-- Heal script: optional outbound beacon poll once per tick (`BEACON_URL`, `BEACON_POLL_TOKEN_FILE`, `BEACON_MACHINE_ID`), off unless configured. Distinct reason `beacon_request`. Fixture tests only.
-- Not in this change: deploy, secrets, a version bump.
+- `worker-beacon/`: heal-only inbox Worker (strict `heal_request` schema, single-use `jti`, `exp` <=120s, per-machine Durable Object, 1/5min and 3/hour limit) with unit tests. Deployed and live on the operator's personal Cloudflare at https://latch-worker-beacon.kadosh.workers.dev. Tokens are Worker secrets plus a token file outside the repo; none are in git. No account id in the repo.
+- Heal script: optional outbound beacon poll once per tick (`BEACON_URL`, `BEACON_POLL_TOKEN_FILE`, `BEACON_MACHINE_ID`), off unless configured. Distinct reason `beacon_request`. Fixture tests plus the live Prove C below.
+- **Prove C: PASS** on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)). A heal request POSTed from a remote box (not by creating the local `.request` file) relaunched Grok Bot with reason `beacon_request`: old pid replaced, `status=healed`, `readiness=ready`. Bad requests (missing `exp`, expired, unsupported action) were each rejected with 400; a replayed `jti` got 409 and a second accept inside 5 minutes got 429. This is **not** Prove D. S-NEW-D under a real cloud disconnect with a moving heartbeat is still unproven. Not done: Prove D; the optional live `.disable`-blocks-beacon check.
+- `.gitignore`: `.wrangler/` and `node_modules/`.
 
 ## 1.3.0 — 2026-10-02
 - Readiness gate: after `open -ga`, `healed` is written only when the process is up and (heartbeat age is finite and under `HEARTBEAT_STALE_SEC`, or `bootOutcome=ready`). Bounded wait `READINESS_WAIT_SEC` (default 75). Otherwise `heal_incomplete` or `heal_failed` with `readiness` and `escalateHint`.

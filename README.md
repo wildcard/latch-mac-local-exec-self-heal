@@ -4,16 +4,16 @@ LaunchAgent that runs **on the Mac** and gently relaunches [Grok Bot](https://gr
 
 It does not need a cloud shell. Once the desktop link is gone, a remote agent cannot install or run this for you — it has to already be loaded.
 
-**Version:** see `VERSION` (current **1.3.0**).
+**Version:** see `VERSION` (current **1.4.0**).
 
-## 1.3.0 shipped vs 1.4.0 proposed
+## 1.3.0 vs 1.4.0
 
-| | **1.3.0 (this tree, `VERSION`)** | **1.4.0 (proposal only)** |
+| | **1.3.0** | **1.4.0 (this tree, `VERSION`)** |
 |---|---|---|
-| Status | Shipped. LaunchAgent, tests, install. | Docs under [`docs/1.4.0/`](docs/1.4.0/), Worker source in [`worker-beacon/`](worker-beacon/) (not deployed), optional beacon poll hook (off by default, not proven live). No version bump. |
+| Status | Shipped. LaunchAgent, tests, install. | Adds the worker-beacon heal-only inbox. Worker in [`worker-beacon/`](worker-beacon/) is deployed and live on the operator's personal Cloudflare (https://latch-worker-beacon.kadosh.workers.dev); optional Mac beacon poll hook is off by default. Prove C passed on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)). Prove D still open. |
 | What it heals | Dead process, stale heartbeat, bad `bootOutcome`, frozen `heartbeatAtMs`, on-Mac `.request` file. | Same, **plus** the classes 1.3.0 cannot see — especially S-NEW-D. |
-| S-NEW-D | **Not auto-healed.** Moving heartbeat under 180s stays `ok` / `local_healthy`. `cloudConnectObservable` is always `false`. Long ok streak sets `escalateHint` only. | Must identify the class and relaunch (quit + `open -ga "Grok Bot"`), or accept a heal-only beacon that does that. **Not implemented. Not proven.** |
-| How S-NEW-D would be seen | It cannot. | Prefer a native connection file written by Grok Bot so a bot does not have to declare the Mac down. 2026-10-02 dig found no such file. Last resort: personal Cloudflare Worker, heal-request only, Mac outbound poll. Beacon would bypass the 300s cooldown. See [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md). |
+| S-NEW-D | **Not auto-healed.** Moving heartbeat under 180s stays `ok` / `local_healthy`. `cloudConnectObservable` is always `false`. Long ok streak sets `escalateHint` only. | A heal-only beacon request relaunches Grok Bot (reason `beacon_request`). **Beacon path proven (Prove C).** Not proven against a real cloud disconnect with a moving heartbeat (Prove D). Nothing detects S-NEW-D by itself; a bot or operator must send the request. |
+| How S-NEW-D is seen | It cannot. | Prefer a native connection file written by Grok Bot so a bot does not have to declare the Mac down. 2026-10-02 dig found no such file. Last resort, now built: personal Cloudflare Worker, heal-request only, Mac outbound poll. Beacon bypasses the 300s cooldown. See [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md). |
 
 Checklist: [`docs/TASKS-1.4.0.md`](docs/TASKS-1.4.0.md).
 
@@ -131,6 +131,6 @@ Cursor is not relaunched unless `HEAL_CURSOR=1`. The local-exec path is Grok Bot
 
 If you quit Grok Bot on purpose, this agent brings it back unless the disable file is set. A relaunch can briefly bounce the Dock icon. Duplicate instances are mitigated by quit-first.
 
-## Optional: worker-beacon poll (unreleased, off by default)
+## Optional: worker-beacon poll (1.4.0, off by default)
 
-Set all three in the LaunchAgent environment to enable one outbound `POST /v1/poll` per tick: `BEACON_URL`, `BEACON_MACHINE_ID`, `BEACON_POLL_TOKEN_FILE` (a file outside this repo holding the poller bearer token). Worker source: [`worker-beacon/`](worker-beacon/). A pending request relaunches like `operator_request` with reason `beacon_request` and bypasses the 300s cooldown. `.disable` wins and skips the poll, so the request stays queued until its `exp`. A second beacon request inside `BEACON_RELAUNCH_WINDOW_SEC` (3600) of a beacon relaunch is not honored (`beacon_suppressed`, escalate). Worker unreachable or malformed reply: no-op. Not deployed, not proven live.
+Set all three in the LaunchAgent environment to enable one outbound `POST /v1/poll` per tick: `BEACON_URL`, `BEACON_MACHINE_ID`, `BEACON_POLL_TOKEN_FILE` (a file outside this repo holding the poller bearer token). Worker source: [`worker-beacon/`](worker-beacon/). A pending request relaunches like `operator_request` with reason `beacon_request` and bypasses the 300s cooldown. `.disable` wins and skips the poll, so the request stays queued until its `exp`. A second beacon request inside `BEACON_RELAUNCH_WINDOW_SEC` (3600) of a beacon relaunch is not honored (`beacon_suppressed`, escalate). Worker unreachable or malformed reply: no-op. The Worker is deployed and live on the operator's personal Cloudflare at https://latch-worker-beacon.kadosh.workers.dev. Writer and poller tokens are Worker secrets and live in a token file outside this repo, never in git. Prove C passed on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)); Prove D is still open.

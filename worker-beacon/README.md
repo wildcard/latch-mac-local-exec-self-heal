@@ -2,7 +2,7 @@
 
 Cloudflare Worker for the **worker-beacon** mode in `docs/1.4.0/SELF-HEAL-MODES.md`.
 It carries one message, `{v:1, action:"heal_request", machineId, jti, exp}`, and nothing else.
-No shell, path, or log data crosses it. Source only: no account id, no secrets, no deploy done from this repo.
+No shell, path, or log data crosses it. No account id and no secrets in git.
 
 | Route | Auth | Result |
 |---|---|---|
@@ -12,9 +12,13 @@ No shell, path, or log data crosses it. Source only: no account id, no secrets, 
 Poll is a POST, not the GET in the spec, because it mutates (ack-on-read) and a retried GET must not eat a flag.
 State lives in one Durable Object per machine so `jti` replay and rate limits are serialized.
 
+## Status
+
+Deployed and live on the operator's personal Cloudflare at https://latch-worker-beacon.kadosh.workers.dev. Tokens are set as Worker secrets and kept in a token file outside the repo, never in git. Prove C passed on the beacon path (`docs/1.4.0/PROVE-C-2026-10-05.md`).
+
 ## Deploy (operator, personal Cloudflare only)
 
-Not done by this change. With Wrangler already signed in to the **personal Gmail** Cloudflare account:
+Human step, not run from this repo. With Wrangler already signed in to the **personal Gmail** Cloudflare account:
 
     cd worker-beacon
     npx wrangler secret put WRITER_TOKEN
@@ -26,6 +30,10 @@ Not done by this change. With Wrangler already signed in to the **personal Gmail
 
     npm test    # node --test, no Cloudflare needed
 
-## Not here yet
+## Mac side
 
-Mac poll client (one POST per 60s tick, then the `operator_request` heal path, disable file wins), and the S-NEW-D prove (plan C/D). `VERSION` stays 1.3.0.
+The optional poll hook lives in the heal script (one POST per 60s tick, then the `operator_request` heal path with reason `beacon_request`, disable file wins).
+
+## Not done yet
+
+Prove D (a real cloud disconnect while the heartbeat is moving) and the optional live `.disable`-blocks-beacon check.
