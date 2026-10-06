@@ -28,7 +28,7 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 
 | Capability | Hermetic test(s) | Live proof | Status |
 |---|---|---|---|
-| Beacon heal (`beacon_request`) | `T-beacon-heal`, `T-beacon-bypasses-cooldown` | [PROVE-C](1.4.0/PROVE-C-2026-10-05.md), PASS 2026-10-05, **on the pre-1.4.1 script (488ce66)** | LIVE on 488ce66. A live beacon heal on 1.4.1+ is **OPEN** |
+| Beacon heal (`beacon_request`) | `T-beacon-heal`, `T-beacon-bypasses-cooldown` | [PROVE-C′](1.4.1/PROVE-C-1.4.1-2026-10-05.md), PASS 2026-10-05 on kit **1.4.1**; earlier proof [PROVE-C](1.4.0/PROVE-C-2026-10-05.md) on the pre-1.4.1 script (488ce66) | **LIVE on 1.4.1** |
 | `{"heal":false}` no-op | `T-beacon-false-noop` | none | PASS |
 | Malformed reply / Worker down no-op | `T-beacon-bad-response-noop`, `T-beacon-worker-down-noop` | none | PASS |
 | Unconfigured = no poll | `T-beacon-unconfigured-no-poll` | none | PASS |
@@ -42,13 +42,13 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 
 | Capability | Test(s) | Live proof | Status |
 |---|---|---|---|
-| Auth (bearer, 401) and per-route tokens | `missing or wrong bearer is 401`, `writer token cannot poll; poller token cannot heal-request`, `unset secrets reject all callers`, `timingSafeEqual ...` | Prove C | PASS |
+| Auth (bearer, 401) and per-route tokens | `missing or wrong bearer is 401`, `writer token cannot poll; poller token cannot heal-request`, `unset secrets reject all callers`, `timingSafeEqual ...` | Prove C, [PROVE-C′](1.4.1/PROVE-C-1.4.1-2026-10-05.md) | PASS |
 | Allow-list | `unknown machine is 403 for both routes` | none | PASS |
-| Strict schema | `extra fields, other actions, bad types rejected and nothing stored`, `bad JSON is 400` | Prove C (400s) | LIVE |
+| Strict schema | `extra fields, other actions, bad types rejected and nothing stored`, `bad JSON is 400` | Prove C, [PROVE-C′](1.4.1/PROVE-C-1.4.1-2026-10-05.md) (400s) | LIVE |
 | `exp` bounds | `expired and too-far exp rejected` | Prove C (expired 400) | LIVE |
-| `jti` replay | `replayed jti rejected` | Prove C (409) | LIVE |
-| Rate limit 1/5min, 3/hour | `rate limit: 5 min gap and 3/hour` (core-level unit test) | Prove C (429) | LIVE (1/5min); hourly cap unit-tested only |
-| Consume-once poll, expired flag dropped | `valid request is accepted and consumed once`, `accept then poll consume-once via Worker routing`, `expired pending flag is not returned` | Prove C | LIVE |
+| `jti` replay | `replayed jti rejected` | Prove C, [PROVE-C′](1.4.1/PROVE-C-1.4.1-2026-10-05.md) (409) | LIVE |
+| Rate limit 1/5min, 3/hour | `rate limit: 5 min gap and 3/hour` (core-level unit test) | Prove C, [PROVE-C′](1.4.1/PROVE-C-1.4.1-2026-10-05.md) (429) | LIVE (1/5min); hourly cap unit-tested only |
+| Consume-once poll, expired flag dropped | `valid request is accepted and consumed once`, `accept then poll consume-once via Worker routing`, `expired pending flag is not returned` | Prove C, [PROVE-C′](1.4.1/PROVE-C-1.4.1-2026-10-05.md) | LIVE |
 | Routing (GET/unknown path 404) | `GET is 404; unknown path is 404` | none | PASS |
 
 ## Run the checks
@@ -57,11 +57,10 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 - [ ] `cd worker-beacon && npm test` -> 15 of 15 pass.
 - [ ] `bash -n grok-bot-local-exec-heal.sh install.sh tests/run-tests.sh`
 
-**Last verified:** 2026-10-05, branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip (first verified commit `1542fb4`): macOS `passed=38 failed=0` (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`), Linux with GNU `stat` `passed=38 failed=0`, worker 15/15.
+**Last verified:** 2026-10-05 (live beacon heal on kit 1.4.1: Prove C′ PASS), branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip (first verified commit `1542fb4`): macOS `passed=38 failed=0` (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`), Linux with GNU `stat` `passed=38 failed=0`, worker 15/15.
 
 - Not part of the checks: `LIVE=1 tests/live-process-down.sh` (quits the app).
 
 ## Open
 
 - Prove D: a real cloud disconnect with a moving heartbeat, healed via the beacon. Opportunistic; it cannot be staged honestly.
-- A live beacon heal on 1.4.1 or later (Prove C ran on 488ce66).

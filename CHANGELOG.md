@@ -6,7 +6,7 @@
 - New tests: `T-beacon-token-group-readable`, `T-beacon-token-0400-polls`, `T-beacon-token-0600-polls`, `T-beacon-token-perms-unknown-refuses`, `T-beacon-token-junk-stat-python-fallback`. `BEACON_TEST_NO_PY_PERMS=1` is a test-only hook that disables the python fallback.
 - `docs/CAPABILITY-CHECKS.md`: every capability mapped to its test, live proof and honest status.
 - `docs/1.4.0/PROVE-DISABLE-2026-10-05.md`: live record that `.disable` wins over a beacon heal-request (PASS).
-- Stale docs fixed (README, PRODUCT-BAR, worker-beacon README). Prove D remains open; a live beacon heal on 1.4.1+ is not yet done.
+- Stale docs fixed (README, PRODUCT-BAR, worker-beacon README). Prove C′ PASS: a live beacon heal on kit 1.4.1 ([`docs/1.4.1/PROVE-C-1.4.1-2026-10-05.md`](docs/1.4.1/PROVE-C-1.4.1-2026-10-05.md)). Prove D remains open.
 
 ## 1.4.1 — 2026-10-05
 
