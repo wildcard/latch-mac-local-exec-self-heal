@@ -8,8 +8,9 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 
 | Capability | Hermetic test(s) | Live proof | Status |
 |---|---|---|---|
-| S1 main process down | `T-readiness-pass`, `T-readiness-incomplete`, `T-readiness-failed` | 1.3.0 install prove ([PROVE-1.3.0](1.4.0/PROVE-1.3.0.md)); incident record ([INCIDENT](INCIDENT-2026-10-02.md)) | PASS; live prove for the live-quit script was skipped in 1.3.0 |
-| S2 heartbeat stale > 180s | `T-stale-beats-frozen`, `T-no-heartbeat-soft` | none | PASS |
+| S1 main process down | `T-readiness-pass`, `T-readiness-incomplete`, `T-readiness-failed` | Live process-down prove **skipped** in 1.3.0 ([PROVE-1.3.0](1.4.0/PROVE-1.3.0.md)); incident record ([INCIDENT](INCIDENT-2026-10-02.md)). The quit + `open -ga` relaunch path itself was exercised live by Prove C via `beacon_request` | PASS; no dedicated live process-down prove |
+| S2 heartbeat stale > 180s | `T-stale-beats-frozen` | none | PASS |
+| Process up, no heartbeat file: soft ok, no relaunch | `T-no-heartbeat-soft` | none | PASS |
 | S3 `bootOutcome` not `ready` | `T-readiness-incomplete` (readiness gate path) | none | PASS (partial: boot-outcome relaunch is exercised through the readiness cases) |
 | S4 healthy tick is a no-op | `T-healthy` | long healthy streak on the operator Mac (1.1.0 changelog) | LIVE |
 | S5 / `.disable` wins | `T-disable`, `T-beacon-disabled-stays-queued`, `T-beacon-operator-request-wins` | [PROVE-DISABLE](1.4.0/PROVE-DISABLE-2026-10-05.md) (2026-10-05 11:29-11:32 PT) | LIVE |
@@ -17,7 +18,7 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 | S7 readiness gate | `T-readiness-pass`, `T-readiness-incomplete`, `T-readiness-failed` | [PROVE-C](1.4.0/PROVE-C-2026-10-05.md) (`healed`, `readiness=ready`) | LIVE |
 | S8 sleep / lid closed | none | none | N/A (documented non-goal) |
 | S9 / S-NEW-D silent disconnect | `T-moving-heartbeat-no-heal`, `T-ok-escalate-hint` (regression: no false heal, hint only) | none | **Prove D OPEN / opportunistic.** Nothing detects S-NEW-D by itself; a bot or operator must POST to the beacon. A process kill is S1, not S-NEW-D. |
-| S10 intentional quit | same path as S1 (`T-readiness-*`) | 1.3.0 live prove | PASS (covered by S1) |
+| S10 intentional quit | same path as S1 (`T-readiness-*`) | none dedicated; same relaunch path as S1, which Prove C exercised live via `beacon_request` | PASS (covered by S1) |
 | Frozen heartbeat | `T-heartbeat-frozen`, `T-frozen-under-threshold`, `T-stuck-flag-off` | none | PASS |
 | Operator request file | `T-operator_request`, `T-operator-bypasses-cooldown` | none | PASS |
 | App missing | `T-app-missing` | none | PASS |
@@ -55,6 +56,9 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 - [ ] `./tests/run-tests.sh` -> `passed=38 failed=0` (macOS and Linux). Hermetic: no live app, no launchd, no network.
 - [ ] `cd worker-beacon && npm test` -> 15 of 15 pass.
 - [ ] `bash -n grok-bot-local-exec-heal.sh install.sh tests/run-tests.sh`
+
+**Last verified:** 2026-10-05, branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip (first verified commit `1542fb4`): macOS `passed=38 failed=0` (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`), Linux with GNU `stat` `passed=38 failed=0`, worker 15/15.
+
 - Not part of the checks: `LIVE=1 tests/live-process-down.sh` (quits the app).
 
 ## Open
