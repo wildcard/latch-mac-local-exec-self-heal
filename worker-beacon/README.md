@@ -36,4 +36,4 @@ The optional poll hook lives in the heal script (one POST per 60s tick, then the
 
 ## Not done yet
 
-Prove D (a real cloud disconnect while the heartbeat is moving) and the optional live `.disable`-blocks-beacon check.
+Prove D (a real cloud disconnect while the heartbeat is moving). The live `.disable`-blocks-beacon check passed 2026-10-05 (`docs/1.4.0/PROVE-DISABLE-2026-10-05.md`).

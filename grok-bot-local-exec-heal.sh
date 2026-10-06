@@ -1,5 +1,5 @@
 #!/bin/bash
-# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.1 (+ optional worker-beacon poll).
+# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.2 (+ optional worker-beacon poll).
 # Runs on the Mac without cloud connectivity.
 # Relaunches Grok Bot.app when the desktop process is down, the dune-reliability
 # heartbeat is stale, bootOutcome is not ready, the heartbeat timestamp is frozen,
@@ -14,7 +14,7 @@
 # Set HEAL_CURSOR=1 to also ensure Cursor.app is up.
 set -euo pipefail
 
-KIT_VERSION="1.4.1"
+KIT_VERSION="1.4.2"
 APP_NAME="Grok Bot"
 APP_PATH="${GROK_APP_PATH:-/Applications/Grok Bot.app}"
 SUP="${GROK_SUPPORT_DIR:-$HOME/Library/Application Support/Grok Bot}"
@@ -354,16 +354,44 @@ PY
   BOOT="${R_BOOT:-}"
 }
 
+# Prints the octal permission bits of $1 (3-4 digits), or nothing if they cannot be determined.
+# stat flavour is found by probing, not by OS name (GNU coreutils stat can be first on PATH on macOS):
+# `stat -c %a` (GNU), then `stat -f %Lp` (BSD/macOS). On GNU, `stat -f` is a filesystem stat that
+# exits 0 with junk, so every result is validated strictly before use. Last resort: python, whose
+# output is zero-padded so a short mode such as 040 is still judged (as too open) rather than unknown.
+# BEACON_TEST_NO_PY_PERMS=1 disables the python fallback (tests only; it can only make this stricter).
+token_file_mode() {
+  local f="$1" m=""
+  m="$(stat -c %a "$f" 2>/dev/null || true)"
+  if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
+  m="$(stat -f %Lp "$f" 2>/dev/null || true)"
+  if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
+  if [[ "${BEACON_TEST_NO_PY_PERMS:-0}" != "1" ]]; then
+    m="$("$PYTHON" -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "03o"))' "$f" 2>/dev/null || true)"
+    if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
+  fi
+  return 0
+}
+
 # Sets BEACON_PENDING=1 only when the Worker returns exactly {"heal":true} (boolean true, sole key).
 # Any failure is a no-op: a dead Worker must never block or trigger local heal.
 beacon_poll() {
   BEACON_PENDING=0
   [[ -n "$BEACON_URL" && -n "$BEACON_POLL_TOKEN_FILE" && -n "$BEACON_MACHINE_ID" ]] || return 0
+  # Fail closed: the poller bearer only ever goes over HTTPS (no http://, no other curl schemes).
+  if [[ "$BEACON_URL" != https://?* ]]; then
+    log "beacon: BEACON_URL is not https; refuse"
+    return 0
+  fi
   [[ -r "$BEACON_POLL_TOKEN_FILE" ]] || { log "beacon: token file unreadable"; return 0; }
-  # Refuse group/world-readable token files (macOS/Linux octal mode).
+  # Refuse group/world-readable token files. Fail closed: unknown mode means no poll.
   local perms
-  perms="$(stat -f %Lp "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || stat -c %a "$BEACON_POLL_TOKEN_FILE" 2>/dev/null || echo "")"
-  if [[ -n "$perms" ]] && (( (8#$perms & 077) != 0 )); then
+  perms="$(token_file_mode "$BEACON_POLL_TOKEN_FILE")"
+  if [[ -z "$perms" ]]; then
+    log "beacon: token file perms unknown; refuse"
+    return 0
+  fi
+  if (( (8#$perms & 077) != 0 )); then
     log "beacon: token file perms too open ($perms); want 600 or tighter"
     return 0
   fi
@@ -379,14 +407,15 @@ beacon_poll() {
     return 0
   fi
   body="$("$PYTHON" -c 'import json,sys; print(json.dumps({"machineId": sys.argv[1]}))' "$BEACON_MACHINE_ID")"
-  # Auth header via curl -K on stdin so the token never appears in ps. Escape for curl config quotes.
-  curl_cfg="$("$PYTHON" -c 'import sys
-t = sys.argv[1]
+  # Auth header via curl -K on stdin so the token never appears in any argv (ps): it reaches python
+  # on stdin (printf is a builtin) and curl on stdin. Escape for curl config quotes.
+  curl_cfg="$(printf '%s' "$token" | "$PYTHON" -c 'import sys
+t = sys.stdin.read()
 # Defense in depth: escape \ and " even though we already refused them above.
 esc = t.replace("\\", "\\\\").replace("\"", "\\\"")
 print("header = \"Authorization: Bearer " + esc + "\"")
-' "$token")"
-  resp="$(printf '%s\n' "$curl_cfg"     | "$BEACON_CURL" -sS --max-time 10 -X POST -H 'content-type: application/json'         --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
+')"
+  resp="$(printf '%s\n' "$curl_cfg"     | "$BEACON_CURL" -sS --proto =https --max-time 10 -X POST -H 'content-type: application/json'         --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
   if [[ "$("$PYTHON" -c 'import json,sys
 try:
     r = json.loads(sys.argv[1])
