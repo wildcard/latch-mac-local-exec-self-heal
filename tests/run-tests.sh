@@ -473,13 +473,34 @@ t_beacon_token_0600_polls() {
   ! grep -q "fake-poll-token-for-tests" "$HEAL_LOG" || die "token leaked into log"
 }
 
-# A junk `stat` (GNU-style `stat -f` output) plus the test-only BEACON_TEST_NO_PY_PERMS hook that
-# disables the python fallback: mode cannot be determined, so the poll must be refused (fail closed).
+# Writes $TMP/shim/stat. The two permission probes (`-c %a`, `-f %Lp`) get the canned behaviour
+# named by $1/$2 ("junk" = exit 0 with GNU filesystem-stat junk, "fail" = exit 1, else print that
+# value); every other stat call is delegated to the real stat so the rest of the heal run is unaffected.
+make_stat_shim() {
+  local c_mode="$1" f_mode="$2" real
+  real="$(command -v stat)"
+  mkdir -p "$TMP/shim"
+  cat > "$TMP/shim/stat" <<EOF
+#!/bin/sh
+canned() {
+  case "\$1" in
+    junk) echo "  File: junk"; echo "    ID: 0 Namelen: 255"; exit 0 ;;
+    fail) echo "stat: illegal option" >&2; exit 1 ;;
+    *) echo "\$1"; exit 0 ;;
+  esac
+}
+if [ "\$1" = "-c" ] && [ "\$2" = "%a" ]; then canned "$c_mode"; fi
+if [ "\$1" = "-f" ] && [ "\$2" = "%Lp" ]; then canned "$f_mode"; fi
+exec "$real" "\$@"
+EOF
+  chmod 755 "$TMP/shim/stat"
+}
+
+# Junk from both probes and the python fallback disabled (test-only BEACON_TEST_NO_PY_PERMS):
+# mode cannot be determined, so the poll must be refused (fail closed).
 t_beacon_token_perms_unknown_refuses() {
   beacon_env
-  mkdir -p "$TMP/shim"
-  printf '#!/bin/sh\necho "  File: junk"\necho "    ID: 0 Namelen: 255"\nexit 0\n' > "$TMP/shim/stat"
-  chmod 755 "$TMP/shim/stat"
+  make_stat_shim junk junk
   PATH="$TMP/shim:$PATH" BEACON_TEST_NO_PY_PERMS=1 run_heal
   [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
   [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled with unknown perms"
@@ -489,12 +510,71 @@ t_beacon_token_perms_unknown_refuses() {
 # Same junk stat but python fallback enabled: mode is recovered, 0600 still polls.
 t_beacon_token_junk_stat_python_fallback_polls() {
   beacon_env
-  mkdir -p "$TMP/shim"
-  printf '#!/bin/sh\necho "  File: junk"\nexit 0\n' > "$TMP/shim/stat"
-  chmod 755 "$TMP/shim/stat"
+  make_stat_shim junk junk
   PATH="$TMP/shim:$PATH" run_heal
   [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
   [[ -s "$BEACON_STUB_CALLS" ]] || die "did not poll via python fallback"
+}
+
+# Probe, not uname: GNU stat first on PATH (e.g. macOS + Homebrew gnubin) answers `-c %a` and gives
+# junk for `-f %Lp`. With no python fallback the mode must still be found from the GNU probe.
+t_beacon_token_probe_gnu_stat_polls() {
+  beacon_env
+  make_stat_shim 600 junk
+  PATH="$TMP/shim:$PATH" BEACON_TEST_NO_PY_PERMS=1 run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ -s "$BEACON_STUB_CALLS" ]] || die "did not poll with GNU-style stat"
+}
+
+# Mirror: BSD stat rejects `-c`; the `-f %Lp` probe answers. A too-open answer still refuses.
+t_beacon_token_probe_bsd_stat() {
+  beacon_env
+  make_stat_shim fail 600
+  PATH="$TMP/shim:$PATH" BEACON_TEST_NO_PY_PERMS=1 run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ -s "$BEACON_STUB_CALLS" ]] || die "did not poll with BSD-style stat"
+  setup_env; beacon_env
+  make_stat_shim fail 644
+  PATH="$TMP/shim:$PATH" BEACON_TEST_NO_PY_PERMS=1 run_heal
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled with BSD-reported 644"
+  grep -q "perms too open (644)" "$HEAL_LOG" || die "missing perms too open log"
+}
+
+# token_file_mode on real files (stat needs no read access, so mode 040 is testable without a
+# second uid): a short mode is judged, not "unknown"; 4-digit modes pass through.
+t_token_file_mode_real_modes() {
+  local f="$TMP/modefile" m
+  : > "$f"
+  eval "$(sed -n '/^token_file_mode() {/,/^}/p' "$HEAL")"
+  local PYTHON; PYTHON="$(command -v python3)"
+  chmod 040 "$f"; m="$(token_file_mode "$f")"
+  [[ "$m" =~ ^0?040$ ]] || die "040 -> '$m'"
+  (( (8#$m & 077) != 0 )) || die "040 not judged too open"
+  chmod 600 "$f"; m="$(token_file_mode "$f")"; [[ "$m" == "600" ]] || die "600 -> '$m'"
+  chmod 1600 "$f" 2>/dev/null && { m="$(token_file_mode "$f")"; [[ "$m" == "1600" || "$m" == "600" ]] || die "1600 -> '$m'"; }  # BSD %Lp drops the sticky bit
+  # Same 040 with both stat probes junk: python fallback zero-pads to 040.
+  make_stat_shim junk junk
+  chmod 040 "$f"; m="$(PATH="$TMP/shim:$PATH" token_file_mode "$f")"
+  [[ "$m" == "040" ]] || die "python 040 -> '$m'"
+  chmod 600 "$f"
+}
+
+# The token must never be in any argv: record python and curl argv via shims and grep both.
+t_beacon_token_never_in_argv() {
+  beacon_env
+  local real_py; real_py="$(command -v python3)"
+  export PY_ARGV_LOG="$TMP/py-argv"
+  : > "$PY_ARGV_LOG"
+  mkdir -p "$TMP/shim"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$PY_ARGV_LOG"\nexec "%s" "$@"\n' "$real_py" > "$TMP/shim/python3-argv"
+  chmod 755 "$TMP/shim/python3-argv"
+  PYTHON="$TMP/shim/python3-argv" run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ -s "$PY_ARGV_LOG" ]] || die "python shim not used"
+  [[ -s "$BEACON_STUB_CALLS" ]] || die "curl stub not used"
+  ! grep -q "fake-poll-token" "$PY_ARGV_LOG" || die "token in python argv"
+  ! grep -q "fake-poll-token" "$BEACON_STUB_CALLS" || die "token in curl argv"
+  ! grep -q "fake-poll-token" "$HEAL_LOG" || die "token in log"
 }
 
 # A non-HTTPS BEACON_URL must never receive the poller bearer (fail closed, no poll, no heal).
@@ -646,6 +726,10 @@ run_case T-beacon-token-0400-polls t_beacon_token_0400_polls
 run_case T-beacon-token-0600-polls t_beacon_token_0600_polls
 run_case T-beacon-token-perms-unknown-refuses t_beacon_token_perms_unknown_refuses
 run_case T-beacon-token-junk-stat-python-fallback t_beacon_token_junk_stat_python_fallback_polls
+run_case T-beacon-token-probe-gnu-stat t_beacon_token_probe_gnu_stat_polls
+run_case T-beacon-token-probe-bsd-stat t_beacon_token_probe_bsd_stat
+run_case T-token-file-mode-real-modes t_token_file_mode_real_modes
+run_case T-beacon-token-never-in-argv t_beacon_token_never_in_argv
 run_case T-beacon-token-quote-refuses t_beacon_token_quote_refuses
 run_case T-beacon-http-url-refuses t_beacon_http_url_refuses
 run_case T-beacon-curl-proto-https-only t_beacon_curl_proto_https_only

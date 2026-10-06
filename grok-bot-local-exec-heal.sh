@@ -355,18 +355,19 @@ PY
 }
 
 # Prints the octal permission bits of $1 (3-4 digits), or nothing if they cannot be determined.
-# stat flavour is chosen by OS: BSD/macOS `stat -f %Lp`; GNU `stat -c %a` (on GNU, `stat -f` is a
-# filesystem stat that exits 0 with junk, which used to fail the check open). Output is validated
-# strictly, then a python fallback is tried. BEACON_TEST_NO_PY_PERMS=1 disables the fallback (tests only).
+# stat flavour is found by probing, not by OS name (GNU coreutils stat can be first on PATH on macOS):
+# `stat -c %a` (GNU), then `stat -f %Lp` (BSD/macOS). On GNU, `stat -f` is a filesystem stat that
+# exits 0 with junk, so every result is validated strictly before use. Last resort: python, whose
+# output is zero-padded so a short mode such as 040 is still judged (as too open) rather than unknown.
+# BEACON_TEST_NO_PY_PERMS=1 disables the python fallback (tests only; it can only make this stricter).
 token_file_mode() {
   local f="$1" m=""
-  case "$(uname -s 2>/dev/null)" in
-    Darwin|*BSD) m="$(stat -f %Lp "$f" 2>/dev/null || true)" ;;
-    *) m="$(stat -c %a "$f" 2>/dev/null || true)" ;;
-  esac
+  m="$(stat -c %a "$f" 2>/dev/null || true)"
+  if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
+  m="$(stat -f %Lp "$f" 2>/dev/null || true)"
   if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
   if [[ "${BEACON_TEST_NO_PY_PERMS:-0}" != "1" ]]; then
-    m="$("$PYTHON" -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$f" 2>/dev/null || true)"
+    m="$("$PYTHON" -c 'import os,stat,sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "03o"))' "$f" 2>/dev/null || true)"
     if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then printf '%s\n' "$m"; return 0; fi
   fi
   return 0
@@ -406,13 +407,14 @@ beacon_poll() {
     return 0
   fi
   body="$("$PYTHON" -c 'import json,sys; print(json.dumps({"machineId": sys.argv[1]}))' "$BEACON_MACHINE_ID")"
-  # Auth header via curl -K on stdin so the token never appears in ps. Escape for curl config quotes.
-  curl_cfg="$("$PYTHON" -c 'import sys
-t = sys.argv[1]
+  # Auth header via curl -K on stdin so the token never appears in any argv (ps): it reaches python
+  # on stdin (printf is a builtin) and curl on stdin. Escape for curl config quotes.
+  curl_cfg="$(printf '%s' "$token" | "$PYTHON" -c 'import sys
+t = sys.stdin.read()
 # Defense in depth: escape \ and " even though we already refused them above.
 esc = t.replace("\\", "\\\\").replace("\"", "\\\"")
 print("header = \"Authorization: Bearer " + esc + "\"")
-' "$token")"
+')"
   resp="$(printf '%s\n' "$curl_cfg"     | "$BEACON_CURL" -sS --proto =https --max-time 10 -X POST -H 'content-type: application/json'         --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
   if [[ "$("$PYTHON" -c 'import json,sys
 try:
