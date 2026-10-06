@@ -497,6 +497,24 @@ t_beacon_token_junk_stat_python_fallback_polls() {
   [[ -s "$BEACON_STUB_CALLS" ]] || die "did not poll via python fallback"
 }
 
+# A non-HTTPS BEACON_URL must never receive the poller bearer (fail closed, no poll, no heal).
+t_beacon_http_url_refuses() {
+  beacon_env
+  export BEACON_URL="http://beacon.invalid"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "polled over http"
+  grep -q "BEACON_URL is not https; refuse" "$HEAL_LOG" || die "missing https refuse log"
+  ! grep -q "fake-poll-token-for-tests" "$HEAL_LOG" || die "token leaked into log"
+}
+
+# The https poll passes --proto =https so curl itself cannot be steered to another scheme.
+t_beacon_curl_proto_https_only() {
+  beacon_env
+  run_heal
+  grep -q -- "--proto =https" "$BEACON_STUB_CALLS" || die "curl not pinned to https"
+}
+
 t_beacon_token_quote_refuses() {
   beacon_env
   printf 'bad"token\n' > "$BEACON_POLL_TOKEN_FILE"
@@ -629,6 +647,8 @@ run_case T-beacon-token-0600-polls t_beacon_token_0600_polls
 run_case T-beacon-token-perms-unknown-refuses t_beacon_token_perms_unknown_refuses
 run_case T-beacon-token-junk-stat-python-fallback t_beacon_token_junk_stat_python_fallback_polls
 run_case T-beacon-token-quote-refuses t_beacon_token_quote_refuses
+run_case T-beacon-http-url-refuses t_beacon_http_url_refuses
+run_case T-beacon-curl-proto-https-only t_beacon_curl_proto_https_only
 run_case T-install-preserves-beacon-env t_install_preserves_beacon_env
 run_case T-install-fresh t_install_fresh
 run_case T-install-merge-fail-aborts t_install_merge_fail_aborts

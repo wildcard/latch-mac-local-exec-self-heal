@@ -377,6 +377,11 @@ token_file_mode() {
 beacon_poll() {
   BEACON_PENDING=0
   [[ -n "$BEACON_URL" && -n "$BEACON_POLL_TOKEN_FILE" && -n "$BEACON_MACHINE_ID" ]] || return 0
+  # Fail closed: the poller bearer only ever goes over HTTPS (no http://, no other curl schemes).
+  if [[ "$BEACON_URL" != https://?* ]]; then
+    log "beacon: BEACON_URL is not https; refuse"
+    return 0
+  fi
   [[ -r "$BEACON_POLL_TOKEN_FILE" ]] || { log "beacon: token file unreadable"; return 0; }
   # Refuse group/world-readable token files. Fail closed: unknown mode means no poll.
   local perms
@@ -408,7 +413,7 @@ t = sys.argv[1]
 esc = t.replace("\\", "\\\\").replace("\"", "\\\"")
 print("header = \"Authorization: Bearer " + esc + "\"")
 ' "$token")"
-  resp="$(printf '%s\n' "$curl_cfg"     | "$BEACON_CURL" -sS --max-time 10 -X POST -H 'content-type: application/json'         --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
+  resp="$(printf '%s\n' "$curl_cfg"     | "$BEACON_CURL" -sS --proto =https --max-time 10 -X POST -H 'content-type: application/json'         --data "$body" -K - "${BEACON_URL%/}/v1/poll" 2>/dev/null)" || { log "beacon: poll failed"; return 0; }
   if [[ "$("$PYTHON" -c 'import json,sys
 try:
     r = json.loads(sys.argv[1])
