@@ -6,17 +6,12 @@ It does not need a cloud shell. Once the desktop link is gone, a remote agent ca
 
 **Version:** see `VERSION` (current **1.4.2**).
 
-## 1.3.0 vs 1.4.x
+## Status
 
-| | **1.3.0** | **1.4.x (this tree, `VERSION`)** |
-|---|---|---|
-| Status | Shipped. LaunchAgent, tests, install. | Adds the worker-beacon heal-only inbox. Worker in [`worker-beacon/`](worker-beacon/) is deployed and live on the operator's personal Cloudflare (https://latch-worker-beacon.kadosh.workers.dev); optional Mac beacon poll hook is off by default. Prove C passed on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)); the live `.disable` check passed ([`docs/1.4.0/PROVE-DISABLE-2026-10-05.md`](docs/1.4.0/PROVE-DISABLE-2026-10-05.md)). Prove D still open. Every capability and its test: [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md). |
-| What it heals | Dead process, stale heartbeat, bad `bootOutcome`, frozen `heartbeatAtMs`, on-Mac `.request` file. | Same, **plus** the classes 1.3.0 cannot see — especially S-NEW-D. |
-| S-NEW-D | **Not auto-healed.** Moving heartbeat under 180s stays `ok` / `local_healthy`. `cloudConnectObservable` is always `false`. Long ok streak sets `escalateHint` only. | A heal-only beacon request relaunches Grok Bot (reason `beacon_request`). **Beacon path proven (Prove C).** Not proven against a real cloud disconnect with a moving heartbeat (Prove D). Nothing detects S-NEW-D by itself; a bot or operator must send the request. |
-| How S-NEW-D is seen | It cannot. | Prefer a native connection file written by Grok Bot so a bot does not have to declare the Mac down. 2026-10-02 dig found no such file. Last resort, now built: personal Cloudflare Worker, heal-request only, Mac outbound poll. Beacon bypasses the 300s cooldown. See [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md). |
-
-Checklist: [`docs/TASKS-1.4.0.md`](docs/TASKS-1.4.0.md).
-
+- **Kit:** LaunchAgent, install and hermetic tests. Heals a dead process, a stale heartbeat, a bad `bootOutcome`, a frozen `heartbeatAtMs`, and an on-Mac `.request` file (table below).
+- **Beacon (optional, off by default):** a heal-only inbox. The Worker in [`worker-beacon/`](worker-beacon/) runs on the operator's personal Cloudflare (https://latch-worker-beacon.kadosh.workers.dev); the Mac polls it outbound over HTTPS only (non-`https://` `BEACON_URL` is refused). A pending request relaunches Grok Bot (reason `beacon_request`) and bypasses the 300s cooldown. Proven live: [Prove C′ on 1.4.1](docs/1.4.1/PROVE-C-1.4.1-2026-10-05.md), [`.disable` wins](docs/1.4.0/PROVE-DISABLE-2026-10-05.md).
+- **S-NEW-D (silent disconnect, moving heartbeat):** nothing on the Mac detects it by itself; a long ok streak only sets `escalateHint`, and `cloudConnectObservable` is always `false`. A bot or operator must send the beacon request. Prove D (a real cloud disconnect healed via the beacon) is still open. Background: [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md).
+- **Every capability, its test, live proof and status:** [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md). History by version: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## What it heals
 

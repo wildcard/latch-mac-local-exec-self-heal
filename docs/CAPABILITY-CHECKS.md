@@ -35,6 +35,7 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 | One beacon heal per outage | `T-beacon-second-request-escalates` | none | PASS |
 | Token-file perms (group/world readable refuses; 0600 and 0400 poll) | `T-beacon-token-world-readable`, `T-beacon-token-group-readable`, `T-beacon-token-0600-polls`, `T-beacon-token-0400-polls` | none | PASS |
 | Perms unknown refuses (fail closed, portable stat) | `T-beacon-token-perms-unknown-refuses`, `T-beacon-token-junk-stat-python-fallback` | none | PASS (macOS and Linux) |
+| HTTPS-only beacon URL (non-`https://` refuses, curl pinned `--proto =https`) | `T-beacon-http-url-refuses`, `T-beacon-curl-proto-https-only` | none | PASS |
 | Token quote/backslash refused; token never logged | `T-beacon-token-quote-refuses`, `T-beacon-token-0600-polls` (log check) | none | PASS |
 | Install preserves `BEACON_*` and custom env | `T-install-preserves-beacon-env`, `T-install-fresh`, `T-install-merge-fail-aborts`, `T-install-reset-env` | Mac reinstall (1.4.1) | PASS |
 
@@ -53,11 +54,11 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 
 ## Run the checks
 
-- [ ] `./tests/run-tests.sh` -> `passed=38 failed=0` (macOS and Linux). Hermetic: no live app, no launchd, no network.
+- [ ] `./tests/run-tests.sh` -> `passed=40 failed=0` (macOS and Linux). Hermetic: no live app, no launchd, no network.
 - [ ] `cd worker-beacon && npm test` -> 15 of 15 pass.
 - [ ] `bash -n grok-bot-local-exec-heal.sh install.sh tests/run-tests.sh`
 
-**Last verified:** 2026-10-05 (live beacon heal on kit 1.4.1: Prove C′ PASS), branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip (first verified commit `1542fb4`): macOS `passed=38 failed=0` (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`), Linux with GNU `stat` `passed=38 failed=0`, worker 15/15.
+**Last verified:** 2026-10-05 (live beacon heal on kit 1.4.1: Prove C′ PASS), branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip (first verified commit `1542fb4`): macOS `passed=38 failed=0` at `fd9034a` (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`), Linux with GNU `stat` `passed=38 failed=0`, worker 15/15; with the HTTPS-only check added: Linux `passed=40 failed=0`, worker 15/15.
 
 - Not part of the checks: `LIVE=1 tests/live-process-down.sh` (quits the app).
 

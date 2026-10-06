@@ -3,6 +3,8 @@
 ## 1.4.2 — 2026-10-05
 
 - Token-permission check in the beacon poll is now portable and fails closed. The old `stat -f %Lp || stat -c %a` form failed open on GNU/Linux, where `stat -f` is a filesystem stat that exits 0 with junk, so a 0644 token was still used. Now `token_file_mode` picks the stat flavour by OS, validates the result as 3-4 octal digits, falls back to python, and the poll is refused (`beacon: token file perms unknown; refuse`) when the mode cannot be determined. Group/world-readable still refuses with the existing log text. 0600 and 0400 poll as before. The token is never logged.
+- Beacon poll refuses a non-HTTPS `BEACON_URL` (`beacon: BEACON_URL is not https; refuse`, no poll) and pins curl to `--proto =https`, so the poller bearer can never leave the Mac in cleartext. Tests: `T-beacon-http-url-refuses`, `T-beacon-curl-proto-https-only`.
+- README collapsed to one current-`VERSION` story; the 1.3.0 vs 1.4.x comparison lives in this changelog and `docs/1.4.0/`.
 - New tests: `T-beacon-token-group-readable`, `T-beacon-token-0400-polls`, `T-beacon-token-0600-polls`, `T-beacon-token-perms-unknown-refuses`, `T-beacon-token-junk-stat-python-fallback`. `BEACON_TEST_NO_PY_PERMS=1` is a test-only hook that disables the python fallback.
 - `docs/CAPABILITY-CHECKS.md`: every capability mapped to its test, live proof and honest status.
 - `docs/1.4.0/PROVE-DISABLE-2026-10-05.md`: live record that `.disable` wins over a beacon heal-request (PASS).
