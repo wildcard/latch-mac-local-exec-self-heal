@@ -42,6 +42,15 @@ setup_env() {
   export HEAL_CURSOR=0
   unset HEAL_SWAP_SUPPORT_ON_RELAUNCH || true
   unset HEAL_NOW_MS || true
+  # Helper observer: canned ps/lsof so no test reads the host process table.
+  export HELPER_CHECK=1
+  export HEAL_ON_HELPER_MISSING=0
+  export HELPER_MISSING_SEC=300
+  export HELPER_BASELINE_SEC=600
+  export HELPER_SOCKET_CHECK=1
+  export HELPER_PS_FILE="$FIX/helpers/two-helpers.ps"
+  export HELPER_LSOF_FILE="$FIX/helpers/sockets.lsof"
+  unset HELPER_EXPECTED HEAL_SNAPSHOT_DIR HEAL_SNAPSHOT_KEEP HEAL_SNAPSHOT_MIN_SEC || true
   mkdir -p "$GROK_APP_PATH" "$GROK_SUPPORT_DIR" "$LATCH_DIR" "$(dirname "$HEAL_LOG")"
 }
 
@@ -99,7 +108,7 @@ t_healthy() {
   [[ "$(jget readiness)" == "local_healthy" ]] || die "readiness=$(jget readiness)"
   [[ "$(jget escalateHint)" == "None" ]] || die "hint=$(jget escalateHint)"
   [[ "$(jget pid)" == "4242" ]] || die "pid=$(jget pid)"
-  [[ "$(jget kitVersion)" == "1.4.2" ]] || die "kit=$(jget kitVersion)"
+  [[ "$(jget kitVersion)" == "1.5.0" ]] || die "kit=$(jget kitVersion)"
   [[ "$(jget lastHealAtMs)" == "None" ]] || die "unexpected heal stamp"
   grep -q "heal start" "$HEAL_LOG" && die "healthy tick relaunched" || true
 }
@@ -422,7 +431,7 @@ t_kit_version_matches() {
   local ver kit
   ver="$(tr -d '[:space:]' < "$ROOT/VERSION")"
   kit="$(grep -E '^KIT_VERSION=' "$HEAL" | head -1 | sed -E 's/^KIT_VERSION="//; s/"$//')"
-  [[ "$ver" == "1.4.2" ]] || die "VERSION=$ver"
+  [[ "$ver" == "1.5.0" ]] || die "VERSION=$ver"
   [[ "$kit" == "$ver" ]] || die "KIT_VERSION=$kit VERSION=$ver"
 }
 
@@ -605,6 +614,321 @@ t_beacon_token_quote_refuses() {
   grep -q "quote or backslash" "$HEAL_LOG" || die "missing refuse log"
 }
 
+# --- helper-count observer (1.5.0, S-NEW-D helper-exit signature). Canned ps/lsof; no live app. ---
+jraw() {
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+print(json.dumps(d.get(sys.argv[2])))' "$HEAL_STATE" "$1"
+}
+snap_count() { ls "$(dirname "$HEAL_STATE")"/GrokBotLocalExecHeal-snap-*.json 2>/dev/null | wc -l | tr -d ' '; }
+newest_snap() { ls "$(dirname "$HEAL_STATE")"/GrokBotLocalExecHeal-snap-*.json 2>/dev/null | sort | tail -1; }
+
+# Seed: same main pid 4242, learned baseline 2, helper count below baseline since $1 ms ago.
+seed_helper_missing() {
+  local now="$1" missing_ms="$2" extra="${3:-}"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"checkedAtMs\":$((now - 60000)),\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":1,\"helperStableSinceMs\":$((now - missing_ms)),\"helperMissingSinceMs\":$((now - missing_ms))${extra}}"
+}
+
+t_helper_fields_healthy() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ "$(jget reason)" == "healthy" ]] || die "reason=$(jget reason)"
+  [[ "$(jget helperCount)" == "2" ]] || die "helperCount=$(jget helperCount)"
+  # Other-parent NodeService helper (7000), NetworkService (4302), renderer/GPU and a shell child are not counted.
+  [[ "$(jraw helperPids)" == "[4300, 4301]" ]] || die "helperPids=$(jraw helperPids)"
+  [[ "$(jget helperExpected)" == "None" ]] || die "expected before learning=$(jget helperExpected)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "baseline learned in one tick"
+  [[ "$(jget helperStableSinceMs)" == "$now" ]] || die "stable clock=$(jget helperStableSinceMs)"
+  [[ "$(jget healOnHelperMissing)" == "False" ]] || die "default not log-only"
+  [[ "$(snap_count)" == "0" ]] || die "snapshot on ok tick"
+}
+
+t_helper_learn_baseline() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 700000))}"
+  run_heal
+  [[ "$(jget helperBaseline)" == "2" ]] || die "baseline=$(jget helperBaseline)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "expected=$(jget helperExpected)"
+  [[ "$(jget helperExpectedSource)" == "learned" ]] || die "src=$(jget helperExpectedSource)"
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+}
+
+t_helper_learn_needs_stable_window() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 100000))}"
+  run_heal
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned before HELPER_BASELINE_SEC: $(jget helperBaseline)"
+}
+
+t_helper_learn_not_while_unhealthy() {
+  # boot not ready: count may be stable, but it must not become the baseline.
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"cooldown\",\"pid\":4242,\"lastHealAtMs\":$((now - 10000)),\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 700000))}"
+  run_heal
+  [[ "$(jget status)" == "cooldown" ]] || die "status=$(jget status)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned while unhealthy"
+  [[ "$(jget helperStableSinceMs)" == "$now" ]] || die "stable clock not reset while unhealthy"
+}
+
+t_helper_baseline_never_lowers() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  # count 1 has been stable for 700s (> HELPER_BASELINE_SEC) but the baseline must stay 2.
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":1,\"helperStableSinceMs\":$((now - 700000))}"
+  run_heal
+  [[ "$(jget helperBaseline)" == "2" ]] || die "baseline lowered to $(jget helperBaseline)"
+  [[ "$(jget helperMissingSinceMs)" == "$now" ]] || die "missing clock=$(jget helperMissingSinceMs)"
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+}
+
+t_helper_under_threshold() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 120000
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ "$(jget reason)" == "healthy" ]] || die "reason=$(jget reason)"
+  [[ "$(jget helperMissingSinceMs)" == "$((now - 120000))" ]] || die "missing clock not carried"
+  [[ "$(jget helperCount)" == "1" ]] || die "helperCount=$(jget helperCount)"
+  [[ "$(snap_count)" == "0" ]] || die "snapshot under threshold"
+  grep -q "heal start" "$HEAL_LOG" && die "relaunched under threshold" || true
+}
+
+t_helper_missing_log_only() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "status=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "reason=$(jget reason)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  [[ "$(jget readiness)" == "helper_missing_observe" ]] || die "readiness=$(jget readiness)"
+  [[ "$(jget escalateHint)" == *"helper_missing (log-only)"* ]] || die "hint=$(jget escalateHint)"
+  [[ "$(jget lastHealAtMs)" == "None" ]] || die "heal stamp in log-only"
+  [[ "$(jraw helperPids)" == "[4300]" ]] || die "helperPids=$(jraw helperPids)"
+  grep -q "observe reason=helper_missing" "$HEAL_LOG" || die "missing observe log"
+  grep -q "heal start" "$HEAL_LOG" && die "log-only relaunched" || true
+  [[ "$(snap_count)" == "1" ]] || die "snapshots=$(snap_count)"
+  python3 - "$(newest_snap)" <<'PY' || die "snapshot content"
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s["status"] == "observe" and s["reason"] == "helper_missing", s
+assert s["helperCount"] == 1 and s["helperExpected"] == 2, s
+pids = sorted(p["pid"] for p in s["processTree"])
+assert pids == [4242, 4290, 4291, 4300, 4302, 4400], pids
+PY
+}
+
+t_helper_missing_relaunch() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  materialize "$FIX/post-ready" "$TMP/post" "$now"
+  export HEAL_SWAP_SUPPORT_ON_RELAUNCH="$TMP/post"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "status=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "reason=$(jget reason)"
+  [[ "$(jget action)" == "relaunch" ]] || die "action=$(jget action)"
+  [[ "$(jget readiness)" == "ready" ]] || die "readiness=$(jget readiness)"
+  [[ "$(jget lastHelperHealAtMs)" == "$now" ]] || die "lastHelperHealAtMs=$(jget lastHelperHealAtMs)"
+  [[ "$(jget lastHealAtMs)" == "$now" ]] || die "lastHealAtMs=$(jget lastHealAtMs)"
+  [[ "$(jget helperMissingSinceMs)" == "None" ]] || die "missing clock kept across relaunch"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "baseline kept across relaunch"
+  [[ "$(jget helperCount)" == "1" ]] || die "pre-heal helperCount=$(jget helperCount)"
+  grep -q "heal start reason=helper_missing" "$HEAL_LOG" || die "missing heal start"
+  grep -q "dry-run: skip quit/open" "$HEAL_LOG" || die "dry-run did not skip quit/open"
+  [[ "$(snap_count)" == "1" ]] || die "snapshots=$(snap_count)"
+}
+
+t_helper_missing_cooldown() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  materialize "$FIX/post-ready" "$TMP/post" "$now"
+  export HEAL_SWAP_SUPPORT_ON_RELAUNCH="$TMP/post"
+  seed_helper_missing "$now" 400000 ",\"lastHealAtMs\":$((now - 30000))"
+  run_heal
+  [[ "$(jget status)" == "cooldown" ]] || die "status=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "reason=$(jget reason)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  [[ "$(jget helperMissingSinceMs)" == "$((now - 400000))" ]] || die "missing clock lost in cooldown"
+  grep -q "heal start" "$HEAL_LOG" && die "relaunched in cooldown" || true
+  # Cooldown over (last heal from another reason 400s ago): helper_missing relaunches.
+  seed_helper_missing "$now" 400000 ",\"lastHealAtMs\":$((now - 400000))"
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "status after cooldown=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "reason after cooldown=$(jget reason)"
+}
+
+t_helper_one_relaunch_per_window() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  materialize "$FIX/post-ready" "$TMP/post" "$now"
+  export HEAL_SWAP_SUPPORT_ON_RELAUNCH="$TMP/post"
+  seed_helper_missing "$now" 400000 ",\"lastHealAtMs\":$((now - 600000)),\"lastHelperHealAtMs\":$((now - 600000))"
+  run_heal
+  [[ "$(jget status)" == "helper_suppressed" ]] || die "status=$(jget status)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  [[ "$(jget escalateHint)" == *"escalate"* ]] || die "hint=$(jget escalateHint)"
+  grep -q "heal start" "$HEAL_LOG" && die "second helper relaunch inside window" || true
+  # Outside HELPER_RELAUNCH_WINDOW_SEC a new outage may relaunch again.
+  seed_helper_missing "$now" 400000 ",\"lastHealAtMs\":$((now - 7200000)),\"lastHelperHealAtMs\":$((now - 7200000))"
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "status after window=$(jget status)"
+}
+
+t_helper_operator_request_wins() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  materialize "$FIX/post-ready" "$TMP/post" "$now"
+  export HEAL_SWAP_SUPPORT_ON_RELAUNCH="$TMP/post"
+  seed_helper_missing "$now" 400000
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  run_heal
+  [[ "$(jget reason)" == "operator_request" ]] || die "reason=$(jget reason)"
+  [[ "$(jget status)" == "healed" ]] || die "status=$(jget status)"
+}
+
+t_helper_log_only_beacon_still_heals() {
+  beacon_env
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget reason)" == "beacon_request" ]] || die "reason=$(jget reason)"
+  [[ "$(jget status)" == "healed" ]] || die "status=$(jget status)"
+  [[ -s "$BEACON_STUB_CALLS" ]] || die "log-only observe skipped the beacon poll"
+}
+
+t_helper_disable_wins() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.disable"
+  run_heal
+  [[ "$(jget status)" == "disabled" ]] || die "status=$(jget status)"
+  grep -q "heal start" "$HEAL_LOG" && die "disabled tick relaunched" || true
+  [[ "$(snap_count)" == "0" ]] || die "snapshot while disabled"
+}
+
+t_helper_expected_override() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_EXPECTED=3
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperMissingSinceMs\":$((now - 400000))}"
+  run_heal
+  [[ "$(jget helperExpected)" == "3" ]] || die "expected=$(jget helperExpected)"
+  [[ "$(jget helperExpectedSource)" == "config" ]] || die "src=$(jget helperExpectedSource)"
+  [[ "$(jget status)" == "observe" ]] || die "status=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "reason=$(jget reason)"
+}
+
+t_helper_pid_change_resets() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":9999,\"helperBaseline\":2,\"helperBaselinePid\":9999,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 900000)),\"helperMissingSinceMs\":$((now - 900000))}"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "baseline carried across pid change"
+  [[ "$(jget helperMissingSinceMs)" == "None" ]] || die "missing clock carried across pid change"
+}
+
+t_helper_check_off() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_CHECK=0 HEAL_ON_HELPER_MISSING=1
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ "$(jget helperCount)" == "None" ]] || die "scanned with HELPER_CHECK=0"
+}
+
+t_helper_ps_unreadable_no_signal() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  export HELPER_PS_FILE="$TMP/does-not-exist.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+  [[ "$(jget helperCount)" == "None" ]] || die "count from unreadable ps"
+  grep -q "heal start" "$HEAL_LOG" && die "relaunched on unknown count" || true
+}
+
+t_helper_sockets_counts_no_addresses() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jraw helperSockets)" == '{"4300": 2}' ]] || die "helperSockets=$(jraw helperSockets)"
+  local f; for f in "$HEAL_STATE" "$HEAL_LOG" "$(newest_snap)"; do
+    ! grep -q "203.0.113\|192.0.2" "$f" || die "address leaked into $f"
+    ! grep -q "fixture-user\|fixture-handle\|fixture-secret\|fixture-grandchild" "$f" || die "argv leaked into $f"
+  done
+  # Two helpers: the second has only a non-443 socket.
+  export HELPER_PS_FILE="$FIX/helpers/two-helpers.ps"
+  rm -f "$HEAL_STATE"
+  run_heal
+  [[ "$(jraw helperSockets)" == '{"4300": 2, "4301": 0}' ]] || die "helperSockets(2)=$(jraw helperSockets)"
+  export HELPER_SOCKET_CHECK=0; rm -f "$HEAL_STATE"
+  run_heal
+  [[ "$(jget helperSockets)" == "None" ]] || die "socket check not off"
+}
+
+t_snapshot_rate_limited_and_pruned() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(snap_count)" == "1" ]] || die "first snapshots=$(snap_count)"
+  export HEAL_NOW_MS=$((now + 60000))
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "second status=$(jget status)"
+  [[ "$(snap_count)" == "1" ]] || die "not rate-limited: $(snap_count)"
+  [[ "$(jget lastSnapshotAtMs)" == "$now" ]] || die "lastSnapshotAtMs=$(jget lastSnapshotAtMs)"
+  export HEAL_NOW_MS=$((now + 960000))
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$HEAL_NOW_MS"
+  run_heal
+  [[ "$(snap_count)" == "2" ]] || die "no snapshot after HEAL_SNAPSHOT_MIN_SEC: $(snap_count)"
+  export HEAL_SNAPSHOT_KEEP=2 HEAL_NOW_MS=$((now + 1920000))
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$HEAL_NOW_MS"
+  run_heal
+  [[ "$(snap_count)" == "2" ]] || die "not pruned to HEAL_SNAPSHOT_KEEP: $(snap_count)"
+}
+
+t_install_template_helper_defaults() {
+  local home="$TMP/home3"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
+  mkdir -p "$home"
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "fresh install failed"
+  t_install_env_check "$pl" "HEAL_ON_HELPER_MISSING=0;HELPER_MISSING_SEC=300" || die "template helper defaults"
+  python3 - "$pl" <<'PY' || die "HELPER_EXPECTED must not be pinned by the template"
+import plistlib, sys
+env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
+assert "HELPER_EXPECTED" not in env, env
+PY
+}
+
 echo "kit $(cat "$ROOT/VERSION")  heal=$HEAL"
 t_install_env_check() {
   python3 - "$1" "$2" <<'PY'
@@ -738,6 +1062,26 @@ run_case T-install-fresh t_install_fresh
 run_case T-install-merge-fail-aborts t_install_merge_fail_aborts
 run_case T-install-reset-env t_install_reset_env
 
+run_case T-helper-fields-healthy t_helper_fields_healthy
+run_case T-helper-learn-baseline t_helper_learn_baseline
+run_case T-helper-learn-needs-stable-window t_helper_learn_needs_stable_window
+run_case T-helper-learn-not-while-unhealthy t_helper_learn_not_while_unhealthy
+run_case T-helper-baseline-never-lowers t_helper_baseline_never_lowers
+run_case T-helper-under-threshold t_helper_under_threshold
+run_case T-helper-missing-log-only t_helper_missing_log_only
+run_case T-helper-missing-relaunch t_helper_missing_relaunch
+run_case T-helper-missing-cooldown t_helper_missing_cooldown
+run_case T-helper-one-relaunch-per-window t_helper_one_relaunch_per_window
+run_case T-helper-operator-request-wins t_helper_operator_request_wins
+run_case T-helper-log-only-beacon-still-heals t_helper_log_only_beacon_still_heals
+run_case T-helper-disable-wins t_helper_disable_wins
+run_case T-helper-expected-override t_helper_expected_override
+run_case T-helper-pid-change-resets t_helper_pid_change_resets
+run_case T-helper-check-off t_helper_check_off
+run_case T-helper-ps-unreadable-no-signal t_helper_ps_unreadable_no_signal
+run_case T-helper-sockets-counts-no-addresses t_helper_sockets_counts_no_addresses
+run_case T-snapshot-rate-limited-and-pruned t_snapshot_rate_limited_and_pruned
+run_case T-install-template-helper-defaults t_install_template_helper_defaults
 echo
 echo "passed=$PASS failed=$FAIL"
 if (( FAIL > 0 )); then

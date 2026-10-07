@@ -4,13 +4,13 @@ LaunchAgent that runs **on the Mac** and gently relaunches [Grok Bot](https://gr
 
 It does not need a cloud shell. Once the desktop link is gone, a remote agent cannot install or run this for you — it has to already be loaded.
 
-**Version:** see `VERSION` (current **1.4.2**).
+**Version:** see `VERSION` (current **1.5.0**).
 
 ## Status
 
 - **Kit:** LaunchAgent, install and hermetic tests. Heals a dead process, a stale heartbeat, a bad `bootOutcome`, a frozen `heartbeatAtMs`, and an on-Mac `.request` file (table below).
 - **Beacon (optional, off by default):** a heal-only inbox. The Worker in [`worker-beacon/`](worker-beacon/) runs on the operator's personal Cloudflare (https://latch-worker-beacon.kadosh.workers.dev); the Mac polls it outbound over HTTPS only (non-`https://` `BEACON_URL` is refused). A pending request relaunches Grok Bot (reason `beacon_request`) and bypasses the 300s cooldown. Proven live: [Prove C′ on 1.4.1](docs/1.4.1/PROVE-C-1.4.1-2026-10-05.md), [`.disable` wins](docs/1.4.0/PROVE-DISABLE-2026-10-05.md).
-- **S-NEW-D (silent disconnect, moving heartbeat):** nothing on the Mac detects it by itself; a long ok streak only sets `escalateHint`, and `cloudConnectObservable` is always `false`. A bot or operator must send the beacon request. Prove D (a real cloud disconnect healed via the beacon) is still open. Background: [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md).
+- **S-NEW-D (silent disconnect, moving heartbeat):** `cloudConnectObservable` is always `false`. **1.5.0** adds a Mac-local observer for the **helper-exit signature** seen in the real 2026-10-07 outage (one of two `Grok Bot Helper` `node.mojom.NodeService` utility processes gone while the main process stays healthy): reason `helper_missing`, **log-only by default** (`HEAL_ON_HELPER_MISSING=0`), relaunch opt-in. Agents must auto-POST the beacon request ([agent loop](docs/1.5.0/AGENT-LOOP.md)). Prove D **failed** on 2026-10-07 because nothing posted: [`docs/1.5.0/PROVE-D-FAIL-2026-10-07.md`](docs/1.5.0/PROVE-D-FAIL-2026-10-07.md). Background: [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md).
 - **Every capability, its test, live proof and status:** [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md). History by version: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## What it heals
@@ -22,6 +22,7 @@ It does not need a cloud shell. Once the desktop link is gone, a remote agent ca
 | `bootOutcome` present and not `ready` | Relaunch |
 | Same pid and the same `heartbeatAtMs` for ≥ `STUCK_SEC` (120s) | Relaunch (`heartbeat_frozen`) |
 | File `grok-bot-local-exec-heal.request` present | One-shot relaunch even if the app looks healthy (`operator_request`) |
+| NodeService helper count below expected for ≥ `HELPER_MISSING_SEC` (300s) (1.5.0) | **Log-only by default** (`status=observe`, reason `helper_missing`, snapshot). Relaunch only with `HEAL_ON_HELPER_MISSING=1` (respects cooldown; one per `HELPER_RELAUNCH_WINDOW_SEC`) |
 
 Success (`status=healed`, `readiness=ready`) requires the process to be up **and** either a finite heartbeat younger than `HEARTBEAT_STALE_SEC` or `bootOutcome=ready`, within `READINESS_WAIT_SEC` (default 75s). Process-up alone is not success.
 
@@ -54,7 +55,8 @@ A remote agent that is already disconnected **cannot** drop that file. The reque
 | S6 | Cooldown (300s after a relaunch) | Skip | `status=cooldown` (operator request bypasses) |
 | S7 | After relaunch, readiness | Yes | `healed` only if process + fresh heartbeat **or** `bootOutcome=ready`; else `heal_incomplete` / `heal_failed` |
 | S8 | Sleep / lid closed | No | No false `healed`. Not a wake agent |
-| S9 / S-NEW-D | Cloud disconnected, Mac looks healthy | No | No relaunch. Long ok streak sets `escalateHint`. Operator restart or request file |
+| S9 / S-NEW-D | Cloud disconnected, Mac looks healthy | Beacon | Agent auto-POSTs the beacon ([agent loop](docs/1.5.0/AGENT-LOOP.md)). Long ok streak sets `escalateHint` |
+| S-NEW-D helper exit | Main healthy, one NodeService helper gone (1.5.0) | Log-only default | `observe` / `helper_missing` + snapshot; `HEAL_ON_HELPER_MISSING=1` relaunches |
 | S10 | Intentional quit | Yes, by design | Comes back within ~60s unless `.disable` is set |
 | — | Frozen heartbeat timestamp | Yes | Reason `heartbeat_frozen` when `HEAL_ON_STUCK_SESSION=1` |
 | — | Operator request file | Yes | Reason `operator_request` |
@@ -89,7 +91,22 @@ launchctl print gui/$(id -u)/com.latch.grok-bot-local-exec-heal | head -40
 cat ~/Library/Logs/GrokBotLocalExecHeal-last.json
 ```
 
-`last.json` (schema version 2) includes `status`, `reason`, `action`, `pid`, `heartbeatAgeSec`, `heartbeatAtMs`, `bootOutcome`, `readiness`, `escalateHint`, `lastHealAtMs`, frozen/ok-streak clocks, and `cloudConnectObservable: false`.
+`last.json` (schema version 2) includes `status`, `reason`, `action`, `pid`, `heartbeatAgeSec`, `heartbeatAtMs`, `bootOutcome`, `readiness`, `escalateHint`, `lastHealAtMs`, frozen/ok-streak clocks, and `cloudConnectObservable: false`. 1.5.0 adds `helperCount`, `helperPids`, `helperExpected` (+ source and learned-baseline clocks), `helperMissingSinceMs`, `helperSockets`, `lastHelperHealAtMs`, and `lastSnapshot`. On any tick whose status is not `ok`/`disabled`, a `GrokBotLocalExecHeal-snap-*.json` (decision + helper fields + main/child process names, no argv) is written next to it, rate-limited and pruned.
+
+### Helper observer tunables (1.5.0)
+
+| Env | Default | Meaning |
+|---|---|---|
+| `HEAL_ON_HELPER_MISSING` | `0` | `0` log-only; `1` relaunch on `helper_missing` |
+| `HELPER_MISSING_SEC` | `300` | How long the count must stay below expected |
+| `HELPER_EXPECTED` | *(empty)* | Explicit expected count; empty = learned baseline |
+| `HELPER_BASELINE_SEC` | `600` | Stable-and-healthy time before a count becomes the baseline |
+| `HELPER_RELAUNCH_WINDOW_SEC` | `3600` | One `helper_missing` relaunch per window, then `helper_suppressed` |
+| `HELPER_SOCKET_CHECK` / `HELPER_SOCKET_PORT` | `1` / `443` | Observe-only established-socket counts per helper |
+| `HELPER_CHECK` | `1` | `0` disables the scan |
+| `HEAL_SNAPSHOT_MIN_SEC` / `HEAL_SNAPSHOT_KEEP` / `HEAL_SNAPSHOT_DIR` | `900` / `20` / logs dir | Snapshot rate limit, retention, location |
+
+macOS diagnostics: the unified log can label Grok Bot under another Electron app's name — filter `log show` by `processID`; in zsh call `/usr/bin/log` (`log` is a builtin).
 
 ## Tests
 
@@ -99,7 +116,7 @@ CI-safe fixtures (no live app, no `open`, no `osascript`):
 ./tests/run-tests.sh
 ```
 
-Covers healthy, disable, cooldown, readiness pass / incomplete / failed, operator request (including cooldown bypass), frozen heartbeat above and under `STUCK_SEC`, stale-vs-frozen priority, moving-heartbeat no-heal (S-NEW-D regression), long-ok escalate hint, missing app, and the kit/`VERSION` pin. It also covers the beacon poll hook (heal, no-op, bad reply, Worker down, unconfigured, cooldown bypass, `.disable` queued, one heal per outage, local-request precedence), token-file hygiene (0640/0644 refuse, 0600/0400 poll, perms-unknown fails closed, quote refused), and `install.sh` env preservation (temp `HOME`, launchd skipped). Worker: `cd worker-beacon && npm test`. The full capability-to-test map is [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md).
+Covers healthy, disable, cooldown, readiness pass / incomplete / failed, operator request (including cooldown bypass), frozen heartbeat above and under `STUCK_SEC`, stale-vs-frozen priority, moving-heartbeat no-heal (S-NEW-D regression), long-ok escalate hint, missing app, and the kit/`VERSION` pin. It also covers the beacon poll hook (heal, no-op, bad reply, Worker down, unconfigured, cooldown bypass, `.disable` queued, one heal per outage, local-request precedence), token-file hygiene (0640/0644 refuse, 0600/0400 poll, perms-unknown fails closed, quote refused), the 1.5.0 helper observer (baseline learning, log-only vs relaunch, cooldown, one relaunch per window, operator/beacon/disable precedence, pid-change reset, socket counts without addresses, snapshot rate-limit/prune/no-argv) with canned `ps`/`lsof` fixtures, and `install.sh` env preservation (temp `HOME`, launchd skipped). Worker: `cd worker-beacon && npm test`. The full capability-to-test map is [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md).
 
 Live prove — **quits Grok Bot.app** — only on macOS, only when you set `LIVE=1`, and only after 1.3.0 is installed:
 

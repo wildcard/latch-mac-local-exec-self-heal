@@ -1,13 +1,13 @@
 # Latch Mac local-exec self-heal — specification
 
-**Kit:** `mac-local-exec-self-heal` **1.3.0**
-**Date:** 2026-10-02
+**Kit:** `mac-local-exec-self-heal` **1.5.0** (contract first written for 1.3.0, 2026-10-02)
+**Date:** 2026-10-07
 
 ## Contract
 
 A LaunchAgent on the Mac restores **Grok Bot desktop process and on-Mac readiness signals** (a dune-reliability heartbeat younger than `HEARTBEAT_STALE_SEC`, or `bootOutcome=ready`).
 
-It does **not** observe cloud `ListMachines.connected`. It does **not** wake a sleeping Mac, open a lid, or repair WAN, VPN, or sign-in.
+It does **not** observe cloud `ListMachines.connected`. Since 1.5.0 it observes one Mac-local proxy for the S-NEW-D helper-exit signature (helper count, below); `cloudConnectObservable` stays `false`. It does **not** wake a sleeping Mac, open a lid, or repair WAN, VPN, or sign-in.
 
 After a healable drop, the next ticks either:
 
@@ -31,17 +31,40 @@ Both set `action=relaunch` so the cooldown clock starts.
 
 ## Detection priority
 
-1. Disable file → `disabled` (no relaunch; a request file is left in place)
+1. Disable file → `disabled` (no relaunch; a request file is left in place; no beacon poll)
 2. App bundle missing → `error` / `app_missing`
 3. `grok-bot-local-exec-heal.request` exists → `operator_request` (overrides local health, bypasses cooldown, file removed when relaunch starts)
 4. Process not alive → `process_down`
-5. Heartbeat age > `HEARTBEAT_STALE_SEC` → `heartbeat_stale_<sec>s`
-6. `bootOutcome` present and not `ready` → `boot_outcome_<token>`
-7. If `HEAL_ON_STUCK_SESSION=1` (default): pid unchanged and `heartbeatAtMs` unchanged for ≥ `STUCK_SEC` (default 120) → `heartbeat_frozen`
-8. Process up but no heartbeat file → `ok` / `process_up_no_heartbeat_file` (no relaunch)
-9. Else → `ok` / `healthy`
+5. Process up but no heartbeat file → `ok` / `process_up_no_heartbeat_file` (no relaunch)
+6. Heartbeat age > `HEARTBEAT_STALE_SEC` → `heartbeat_stale_<sec>s`
+7. `bootOutcome` present and not `ready` → `boot_outcome_<token>`
+8. If `HEAL_ON_STUCK_SESSION=1` (default): pid unchanged and `heartbeatAtMs` unchanged for ≥ `STUCK_SEC` (default 120) → `heartbeat_frozen`
+9. **Helper count below expected for ≥ `HELPER_MISSING_SEC` (1.5.0)** → `helper_missing`: relaunch when `HEAL_ON_HELPER_MISSING=1`; otherwise **log-only** (`status=observe`, `readiness=helper_missing_observe`, no relaunch)
+10. Beacon heal-request (only polled when no local heal is needed, incl. in log-only `observe`) → `beacon_request` (bypasses cooldown)
+11. Else → `ok` / `healthy`
 
-Cooldown (`COOLDOWN_SEC`, default 300) suppresses another relaunch except `operator_request`.
+Cooldown (`COOLDOWN_SEC`, default 300) suppresses another relaunch except `operator_request` and `beacon_request`. `helper_missing` **respects** cooldown.
+
+One relaunch per outage window: a second `beacon_request` inside `BEACON_RELAUNCH_WINDOW_SEC` → `beacon_suppressed`; a second `helper_missing` relaunch inside `HELPER_RELAUNCH_WINDOW_SEC` (3600) → `helper_suppressed`. Both escalate instead of looping.
+
+## Helper-count observer (1.5.0, S-NEW-D helper-exit signature)
+
+Background: [Prove D FAIL 2026-10-07](1.5.0/PROVE-D-FAIL-2026-10-07.md). During a real S-NEW-D, one of the two Grok Bot utility helpers of sub-type `node.mojom.NodeService` exited cleanly while the main process and its heartbeat stayed healthy; cloud `connected=false` lasted until the app respawned the helper ~50 min later.
+
+Each tick (main pid alive, `HELPER_CHECK=1`):
+
+- **Count** = children of the main pid whose executable is `HELPER_NAME*` (default `Grok Bot Helper`, inside an app bundle) and whose argv carries `--utility-sub-type=HELPER_SUBTYPE` (default `node.mojom.NodeService`). Source: `ps -axww -o pid=,ppid=,etime=,command=`. Recorded as `helperCount` / `helperPids`.
+- **Expected** = `HELPER_EXPECTED` when set (`helperExpectedSource=config`), else the **learned baseline** (`learned`), else none (no detection).
+- **Learning:** a count that holds for ≥ `HELPER_BASELINE_SEC` (600) while the main pid is locally healthy (heartbeat fresh, `bootOutcome` ready or absent, not frozen) becomes the baseline. For a given main pid the baseline only rises; it resets when the pid changes or after any relaunch. A baseline of 0 never fires.
+- **Missing clock:** `helperMissingSinceMs` starts the first tick count < expected (same pid) and clears when the count recovers. At ≥ `HELPER_MISSING_SEC` (300) → `helper_missing`.
+- **Unknown count** (ps failed / unreadable) is never treated as missing.
+- **Sockets (observe-only):** with `HELPER_SOCKET_CHECK=1` (default), `lsof -nP -a -p <helper pids> -iTCP -sTCP:ESTABLISHED -Fpn`; per helper, the count of established connections whose remote port is `HELPER_SOCKET_PORT` (443) → `helperSockets` `{pid: n}`. Counts only: no addresses, hostnames or argv are stored. Never triggers a relaunch.
+
+Ship mode: **log-only** (`HEAL_ON_HELPER_MISSING=0`) for at least a week of real ticks to confirm the baseline is stable across app versions and idle states, then opt in with `HEAL_ON_HELPER_MISSING=1`.
+
+## Diagnostics snapshot (1.5.0)
+
+On every tick whose status is not `ok` or `disabled`, write `GrokBotLocalExecHeal-snap-<YYYYmmddTHHMMSS>-<ms>.json` next to `last.json` (or in `HEAL_SNAPSHOT_DIR`), rate-limited to one per status+reason per `HEAL_SNAPSHOT_MIN_SEC` (900), pruned to the newest `HEAL_SNAPSHOT_KEEP` (20). Contents: the `last.json` decision fields, helper fields, and `processTree` = main pid + direct children as `{pid, ppid, etime, exe, type, subType}`. `exe` is the executable name only; `type`/`subType` only for app-bundle processes and only `[A-Za-z0-9._-]`. **No argv** is stored (Grok Bot children include local-exec shells, and helper argv carries the user-data-dir path).
 
 A heartbeat whose timestamp **keeps moving**, with age still under 180s, is **not** `heartbeat_frozen`. That pattern is S-NEW-D when the cloud link is nevertheless down. See the incident note.
 
@@ -51,7 +74,7 @@ Written every tick that gets the lock.
 
 | Field | Meaning |
 |---|---|
-| `status` | `ok`, `disabled`, `error`, `cooldown`, `healed`, `heal_incomplete`, `heal_failed` |
+| `status` | `ok`, `observe` (1.5.0 log-only `helper_missing`), `disabled`, `error`, `cooldown`, `healed`, `heal_incomplete`, `heal_failed`, `beacon_suppressed`, `helper_suppressed` |
 | `reason` | Why this tick decided what it decided |
 | `action` | `none` or `relaunch` |
 | `pid`, `heartbeatAgeSec`, `heartbeatAtMs`, `bootOutcome` | Local signals |
@@ -60,8 +83,17 @@ Written every tick that gets the lock.
 | `heartbeatFrozenSinceMs`, `heartbeatUnchangedForSec` | Frozen-timestamp clock |
 | `okStreakSinceMs` | Continuous local-healthy streak for the same pid |
 | `lastHealAtMs`, `lastHealIso` | Last relaunch attempt |
+| `lastBeaconHealAtMs` | Last `beacon_request` relaunch (1.4.0) |
 | `cloudConnectObservable` | Always `false` |
-| `kitVersion` | `1.3.0` |
+| `kitVersion` | `1.5.0` |
+| `helperCount`, `helperPids` | NodeService helpers under the main pid at tick start (`null` = not scanned / unknown) |
+| `helperExpected`, `helperExpectedSource` | Expected count and where it came from (`config` / `learned` / `null`) |
+| `helperBaseline`, `helperBaselinePid`, `helperStableCount`, `helperStableSinceMs` | Learned-baseline bookkeeping |
+| `helperMissingSinceMs`, `helperMissingForSec` | Missing clock |
+| `helperSockets` | `{pid: established count to HELPER_SOCKET_PORT}` or `null` |
+| `helperCheck`, `healOnHelperMissing` | Effective switches |
+| `lastHelperHealAtMs` | Last `helper_missing` relaunch |
+| `lastSnapshot`, `lastSnapshotAtMs`, `lastSnapshotStatus`, `lastSnapshotReason` | Newest diagnostics snapshot (file name only) |
 
 The long-ok hint tells a person reading the file: local signals look healthy, cloud connect is invisible, restart the app or drop the request file on this Mac.
 
@@ -77,10 +109,20 @@ The long-ok hint tells a person reading the file: local signals look healthy, cl
 | S6 cooldown | Skip | `cooldown` |
 | S7 post-relaunch readiness | Yes | No premature `healed` |
 | S8 sleep / lid | No | Do not claim healed |
-| S9 / S-NEW-D cloud-only disconnect | No | Rich `last.json`; human restart or request file |
+| S9 / S-NEW-D cloud-only disconnect | Beacon / helper | Beacon POST by an agent ([agent loop](1.5.0/AGENT-LOOP.md)); human restart or request file |
+| S-NEW-D helper-exit signature (1.5.0) | Log-only by default | `observe` / `helper_missing` + snapshot; relaunch only with `HEAL_ON_HELPER_MISSING=1` (cooldown + one per window) |
 | S10 intentional quit | Yes, by design | Relaunch unless disabled |
 | Frozen timestamp | Yes | `heartbeat_frozen` |
 | Operator request | Yes | `operator_request` |
+
+## Agent loop (1.5.0)
+
+Agents **auto-POST** a beacon heal-request, with no human in the loop, after `connected=false` for ≥ 3 min, **or immediately** when a user message arrives from a machine that `ListMachines` shows `connected=false`. Full rule and brakes: [1.5.0/AGENT-LOOP.md](1.5.0/AGENT-LOOP.md).
+
+## macOS diagnostics gotchas
+
+- The unified log can label Grok Bot processes under **another Electron app's name** (names resolve by binary UUID). Filter `log show` by **`processID`**, not process name.
+- In zsh, `log` is a builtin: use **`/usr/bin/log`**.
 
 ## Tests
 
@@ -89,4 +131,4 @@ The long-ok hint tells a person reading the file: local signals look healthy, cl
 
 ## Out of scope
 
-Second remote watchdog, sleep/network heal, and any claim that a healthy-looking Mac heartbeat proves the cloud link is up.
+Second remote watchdog, sleep/network heal, and any claim that a healthy-looking Mac heartbeat (or a full helper count) proves the cloud link is up.

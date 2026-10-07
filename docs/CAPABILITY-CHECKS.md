@@ -17,7 +17,11 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 | S6 cooldown 300s | `T-cooldown`, `T-beacon-skip-poll-local-cooldown` | none | PASS |
 | S7 readiness gate | `T-readiness-pass`, `T-readiness-incomplete`, `T-readiness-failed` | [PROVE-C](1.4.0/PROVE-C-2026-10-05.md) (`healed`, `readiness=ready`) | LIVE |
 | S8 sleep / lid closed | none | none | N/A (documented non-goal) |
-| S9 / S-NEW-D silent disconnect | `T-moving-heartbeat-no-heal`, `T-ok-escalate-hint` (regression: no false heal, hint only) | none | **Prove D OPEN / opportunistic.** Nothing detects S-NEW-D by itself; a bot or operator must POST to the beacon. A process kill is S1, not S-NEW-D. |
+| S9 / S-NEW-D silent disconnect | `T-moving-heartbeat-no-heal`, `T-ok-escalate-hint` (regression: no false heal, hint only) | [Prove D FAIL 2026-10-07](1.5.0/PROVE-D-FAIL-2026-10-07.md): real S-NEW-D, kit logged healthy, no agent POSTed, app self-recovered after ~50 min | **Prove D FAIL (2026-10-07); still open.** Agents must auto-POST ([agent loop](1.5.0/AGENT-LOOP.md)). A process kill is S1, not S-NEW-D. |
+| S-NEW-D helper-exit signature (1.5.0) | `T-helper-fields-healthy`, `T-helper-learn-baseline`, `T-helper-learn-needs-stable-window`, `T-helper-learn-not-while-unhealthy`, `T-helper-baseline-never-lowers`, `T-helper-under-threshold`, `T-helper-missing-log-only`, `T-helper-missing-relaunch`, `T-helper-missing-cooldown`, `T-helper-one-relaunch-per-window`, `T-helper-operator-request-wins`, `T-helper-log-only-beacon-still-heals`, `T-helper-disable-wins`, `T-helper-expected-override`, `T-helper-pid-change-resets`, `T-helper-check-off`, `T-helper-ps-unreadable-no-signal` | Signature observed by hand in the 2026-10-07 outage (baseline 2 → 1 → 2); detector not yet run live | PASS (log-only default; live baseline week pending) |
+| Helper socket counts (observe-only, no addresses) | `T-helper-sockets-counts-no-addresses` | none | PASS |
+| Diagnostics snapshot on non-ok ticks (rate-limited, pruned, no argv) | `T-helper-missing-log-only`, `T-snapshot-rate-limited-and-pruned`, `T-helper-sockets-counts-no-addresses`, `T-helper-disable-wins` | none | PASS |
+| Template ships helper observer log-only | `T-install-template-helper-defaults` | none | PASS |
 | S10 intentional quit | same path as S1 (`T-readiness-*`) | none dedicated; same relaunch path as S1, which Prove C exercised live via `beacon_request` | PASS (covered by S1) |
 | Frozen heartbeat | `T-heartbeat-frozen`, `T-frozen-under-threshold`, `T-stuck-flag-off` | none | PASS |
 | Operator request file | `T-operator_request`, `T-operator-bypasses-cooldown` | none | PASS |
@@ -54,14 +58,17 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 
 ## Run the checks
 
-- [ ] `./tests/run-tests.sh` -> `passed=44 failed=0` (macOS and Linux). Hermetic: no live app, no launchd, no network.
+- [ ] `./tests/run-tests.sh` -> `passed=64 failed=0` (macOS and Linux). Hermetic: no live app, no launchd, no network, no host process table (canned `ps`/`lsof`).
 - [ ] `cd worker-beacon && npm test` -> 15 of 15 pass.
 - [ ] `bash -n grok-bot-local-exec-heal.sh install.sh tests/run-tests.sh`
 
-**Last verified:** 2026-10-05 (live beacon heal on kit 1.4.1: Prove C′ PASS), branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip: macOS `passed=44 failed=0`, Linux with GNU `stat` `passed=44 failed=0`, worker 15/15 on both (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`).
+**1.5.0 (PR branch `feat/kit-1.5.0-helper-missing`):** Linux `passed=64 failed=0`, `bash -n` clean. macOS run pending (to be recorded before merge).
+
+**Last verified (1.4.2):** 2026-10-05 (live beacon heal on kit 1.4.1: Prove C′ PASS), branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip: macOS `passed=44 failed=0`, Linux with GNU `stat` `passed=44 failed=0`, worker 15/15 on both (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`).
 
 - Not part of the checks: `LIVE=1 tests/live-process-down.sh` (quits the app).
 
 ## Open
 
-- Prove D: a real cloud disconnect with a moving heartbeat, healed via the beacon. Opportunistic; it cannot be staged honestly.
+- Prove D: a real cloud disconnect with a moving heartbeat, healed via the beacon or the helper observer. **FAIL on 2026-10-07** (nothing posted). Opportunistic; it cannot be staged honestly.
+- Helper observer live week: confirm the learned baseline (2) is stable across app versions, idle and sleep before recommending `HEAL_ON_HELPER_MISSING=1`.

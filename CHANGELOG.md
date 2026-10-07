@@ -1,5 +1,19 @@
 # Latch mac-local-exec-self-heal
 
+## 1.5.0 — 2026-10-07
+
+S-NEW-D helper-exit signature, from the real 2026-10-07 outage (Prove D **FAIL**: the kit logged healthy for ~50 min, no agent posted the beacon, the app recovered on its own). Record: [`docs/1.5.0/PROVE-D-FAIL-2026-10-07.md`](docs/1.5.0/PROVE-D-FAIL-2026-10-07.md).
+
+- **Helper-count observer.** Each tick counts `Grok Bot Helper` children of the main pid with `--utility-sub-type=node.mojom.NodeService` (`ps -axww`). Expected = `HELPER_EXPECTED` or a baseline learned from the healthy state (count stable ≥ `HELPER_BASELINE_SEC` 600s with fresh heartbeat; rises only; resets on pid change / relaunch). Below expected for ≥ `HELPER_MISSING_SEC` (300s) → reason `helper_missing`.
+- **Log-only by default.** `HEAL_ON_HELPER_MISSING=0` → `status=observe`, `readiness=helper_missing_observe`, `escalateHint`, snapshot, no relaunch; the beacon is still polled, so an agent POST still heals. `HEAL_ON_HELPER_MISSING=1` → relaunch through the existing quit/open path and readiness gate, under the single-flight lock and `COOLDOWN_SEC`; one helper relaunch per `HELPER_RELAUNCH_WINDOW_SEC` (3600), then `helper_suppressed` + escalate. `.disable`, `operator_request` keep precedence.
+- **Socket counts (observe-only).** Per helper, established TCP sockets to `HELPER_SOCKET_PORT` (443) via `lsof -Fpn` → `helperSockets`. Counts only, no addresses. Never relaunches.
+- **last.json:** `helperCount`, `helperPids`, `helperExpected`, `helperExpectedSource`, baseline/missing clocks, `helperSockets`, `lastHelperHealAtMs`, `lastSnapshot*`.
+- **Diagnostics snapshot** `GrokBotLocalExecHeal-snap-*.json` on every non-ok (not `ok`/`disabled`) tick: decision + helper fields + main/child process names and type flags. No argv (local-exec shells and the user-data-dir path never land on disk). One per status+reason per `HEAL_SNAPSHOT_MIN_SEC` (900), newest `HEAL_SNAPSHOT_KEEP` (20) kept.
+- **Plist template:** `HEAL_ON_HELPER_MISSING=0`, `HELPER_MISSING_SEC=300` (operator values preserved on reinstall as before).
+- **Agent loop:** agents auto-POST a beacon heal-request after ≥ 3 min `connected=false`, or immediately when a user message arrives from a machine shown `connected=false` ([`docs/1.5.0/AGENT-LOOP.md`](docs/1.5.0/AGENT-LOOP.md)).
+- **macOS gotchas documented:** the unified log can label Grok Bot under another Electron app's name (filter by `processID`); in zsh use `/usr/bin/log`.
+- Tests: 20 new hermetic cases with canned `ps`/`lsof` fixtures (`tests/fixtures/helpers/`); suite 64/64 on Linux. No test reads the host process table or quits an app.
+
 ## 1.4.2 — 2026-10-05
 
 - Token-permission check in the beacon poll is now portable and fails closed. The old `stat -f %Lp || stat -c %a` form failed open on GNU/Linux, where `stat -f` is a filesystem stat that exits 0 with junk, so a 0644 token was still used. Now `token_file_mode` probes `stat -c %a` then `stat -f %Lp` (not chosen by OS name, so GNU coreutils `stat` first on PATH on macOS still works), validates each result as 3-4 octal digits, falls back to python (zero-padded, so a short mode such as 040 is reported as too open, not unknown), and the poll is refused (`beacon: token file perms unknown; refuse`) when the mode cannot be determined. Group/world-readable still refuses with the existing log text. 0600 and 0400 poll as before. The token is never logged and never in any argv: it now reaches python on stdin when the curl `-K` config is built (it used to be a python argv, briefly visible in `ps`).

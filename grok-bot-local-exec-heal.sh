@@ -1,5 +1,6 @@
 #!/bin/bash
-# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.4.2 (+ optional worker-beacon poll).
+# Grok Bot local-exec self-heal (LaunchAgent). Kit 1.5.0 (+ optional worker-beacon poll,
+# + helper-count observer for the S-NEW-D helper-exit signature).
 # Runs on the Mac without cloud connectivity.
 # Relaunches Grok Bot.app when the desktop process is down, the dune-reliability
 # heartbeat is stale, bootOutcome is not ready, the heartbeat timestamp is frozen,
@@ -10,11 +11,15 @@
 # records an escalate hint after a long ok streak and can honor a local request
 # file, but it will not invent a cloud signal.
 #
+# 1.5.0: counts Grok Bot Helper processes of the node.mojom.NodeService utility type under the
+# main pid. One fewer than the learned (or configured) baseline for >= HELPER_MISSING_SEC is the
+# S-NEW-D helper-exit signature (2026-10-07). LOG-ONLY by default (HEAL_ON_HELPER_MISSING=0).
+#
 # Cursor is NOT auto-relaunched (local-exec path is Grok Bot.app).
 # Set HEAL_CURSOR=1 to also ensure Cursor.app is up.
 set -euo pipefail
 
-KIT_VERSION="1.4.2"
+KIT_VERSION="1.5.0"
 APP_NAME="Grok Bot"
 APP_PATH="${GROK_APP_PATH:-/Applications/Grok Bot.app}"
 SUP="${GROK_SUPPORT_DIR:-$HOME/Library/Application Support/Grok Bot}"
@@ -49,6 +54,34 @@ BEACON_CURL="${BEACON_CURL:-curl}"
 # One beacon relaunch per outage: a second beacon request inside this window stops and escalates.
 BEACON_RELAUNCH_WINDOW_SEC="${BEACON_RELAUNCH_WINDOW_SEC:-3600}"
 
+# --- helper-count observer (1.5.0) ---
+# HELPER_CHECK=0 turns the scan off entirely.
+HELPER_CHECK="${HELPER_CHECK:-1}"
+# 0 = log-only (status=observe, reason=helper_missing, no relaunch). 1 = relaunch via the normal
+# quit/open path (single-flight lock, COOLDOWN_SEC, one helper relaunch per HELPER_RELAUNCH_WINDOW_SEC).
+HEAL_ON_HELPER_MISSING="${HEAL_ON_HELPER_MISSING:-0}"
+# Helper count below the expected level for at least this long → helper_missing.
+HELPER_MISSING_SEC="${HELPER_MISSING_SEC:-300}"
+# Explicit expected helper count. Empty = use the baseline learned from the healthy state.
+HELPER_EXPECTED="${HELPER_EXPECTED:-}"
+# A count must hold this long, with the main pid locally healthy, before it becomes the baseline.
+# The learned baseline only ever rises for a given main pid and resets when the pid changes.
+HELPER_BASELINE_SEC="${HELPER_BASELINE_SEC:-600}"
+HELPER_RELAUNCH_WINDOW_SEC="${HELPER_RELAUNCH_WINDOW_SEC:-3600}"
+HELPER_NAME="${HELPER_NAME:-Grok Bot Helper}"
+HELPER_SUBTYPE="${HELPER_SUBTYPE:-node.mojom.NodeService}"
+# Observe-only: per helper, count ESTABLISHED TCP sockets to HELPER_SOCKET_PORT (lsof). Only counts
+# are recorded; no addresses, hostnames or argv.
+HELPER_SOCKET_CHECK="${HELPER_SOCKET_CHECK:-1}"
+HELPER_SOCKET_PORT="${HELPER_SOCKET_PORT:-443}"
+# Tests only: read canned `ps` / `lsof -F pn` output from these files instead of running the tools.
+HELPER_PS_FILE="${HELPER_PS_FILE:-}"
+HELPER_LSOF_FILE="${HELPER_LSOF_FILE:-}"
+# Diagnostics snapshot on non-ok ticks (not ok / disabled). Rate-limited per status+reason.
+HEAL_SNAPSHOT_DIR="${HEAL_SNAPSHOT_DIR:-}"
+HEAL_SNAPSHOT_MIN_SEC="${HEAL_SNAPSHOT_MIN_SEC:-900}"
+HEAL_SNAPSHOT_KEEP="${HEAL_SNAPSHOT_KEEP:-20}"
+
 PYTHON="${PYTHON:-/usr/bin/python3}"
 if [[ ! -x "$PYTHON" ]]; then
   PYTHON="$(command -v python3)"
@@ -70,7 +103,11 @@ file_mtime() {
 # READINESS ESCALATE_HINT FROZEN_SINCE OK_SINCE UNCHANGED_FOR_SEC
 run_inspect() {
   local out
-  out="$("$PYTHON" - \
+  out="$(H_CHECK="$HELPER_CHECK" H_HEAL="$HEAL_ON_HELPER_MISSING" H_MISSING_SEC="$HELPER_MISSING_SEC" \
+    H_EXPECTED="$HELPER_EXPECTED" H_BASELINE_SEC="$HELPER_BASELINE_SEC" H_NAME="$HELPER_NAME" \
+    H_SUBTYPE="$HELPER_SUBTYPE" H_SOCKET_CHECK="$HELPER_SOCKET_CHECK" H_SOCKET_PORT="$HELPER_SOCKET_PORT" \
+    H_PS_FILE="$HELPER_PS_FILE" H_LSOF_FILE="$HELPER_LSOF_FILE" H_SCAN_OUT="$SCAN_FILE" \
+    "$PYTHON" - \
     "$SUP" \
     "$HEARTBEAT_STALE_SEC" \
     "$STUCK_SEC" \
@@ -190,6 +227,158 @@ frozen_hit = (
     and unchanged_for >= stuck_sec
 )
 
+# ---- helper-count observer (1.5.0, S-NEW-D helper-exit signature) ----
+def env_int(name, default=None):
+    v = os.environ.get(name, "")
+    try:
+        return int(str(v).strip()) if str(v).strip() != "" else default
+    except Exception:
+        return default
+
+h_check = os.environ.get("H_CHECK", "1") == "1"
+h_heal = os.environ.get("H_HEAL", "0") == "1"
+h_missing_sec = float(env_int("H_MISSING_SEC", 300))
+h_baseline_sec = float(env_int("H_BASELINE_SEC", 600))
+h_expected_cfg = env_int("H_EXPECTED", None)
+if h_expected_cfg is not None and h_expected_cfg < 0:
+    h_expected_cfg = None
+h_name = os.environ.get("H_NAME", "Grok Bot Helper") or "Grok Bot Helper"
+h_sub = "--utility-sub-type=" + (os.environ.get("H_SUBTYPE", "node.mojom.NodeService") or "node.mojom.NodeService")
+h_sock_check = os.environ.get("H_SOCKET_CHECK", "1") == "1"
+h_sock_port = (os.environ.get("H_SOCKET_PORT", "443") or "").strip()
+
+helper_count = None
+helper_pids = []
+helper_sockets = None
+tree = []
+
+def exe_name(cmd):
+    # Executable name only, never argv: Grok Bot also spawns local-exec shells whose argv can
+    # carry anything. App bundles: the name after /Contents/MacOS/ up to the first " --" flag.
+    m = "/Contents/MacOS/"
+    if m in cmd:
+        return cmd.split(m, 1)[1].split(" --", 1)[0].strip()
+    first = cmd.split(None, 1)[0] if cmd.split() else ""
+    return os.path.basename(first)
+
+def flag(tokens, prefix):
+    for t in tokens:
+        if t.startswith(prefix):
+            return t[len(prefix):]
+    return None
+
+if h_check and alive and pid:
+    lines = None
+    ps_file = os.environ.get("H_PS_FILE", "")
+    if ps_file:
+        try:
+            lines = open(ps_file).read().splitlines()
+        except Exception:
+            lines = None
+    else:
+        try:
+            r = subprocess.run(["ps", "-axww", "-o", "pid=,ppid=,etime=,command="],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                lines = r.stdout.splitlines()
+        except Exception:
+            lines = None
+    if lines is not None:
+        helper_count = 0
+        for ln in lines:
+            parts = ln.split(None, 3)
+            if len(parts) < 4:
+                continue
+            try:
+                p_, pp_ = int(parts[0]), int(parts[1])
+            except Exception:
+                continue
+            if p_ != pid and pp_ != pid:
+                continue
+            cmd = parts[3]
+            exe = exe_name(cmd)
+            toks = cmd.split()
+            in_bundle = "/Contents/MacOS/" in cmd
+            # Type flags only for app-bundle processes, and only a safe charset.
+            ptype = flag(toks, "--type=") if in_bundle else None
+            psub = flag(toks, "--utility-sub-type=") if in_bundle else None
+            safe = lambda v: v if v is None or all(c.isalnum() or c in "._-" for c in v) else "?"
+            ptype, psub = safe(ptype), safe(psub)
+            # Snapshot keeps only pid, ppid, etime, exe basename and the two type flags: no argv,
+            # no user-data-dir path (it carries the username), no handles or tokens.
+            tree.append({"pid": p_, "ppid": pp_, "etime": parts[2], "exe": exe,
+                         "type": ptype, "subType": psub})
+            if pp_ == pid and in_bundle and exe.startswith(h_name) and h_sub in toks:
+                helper_pids.append(p_)
+        helper_pids.sort()
+        helper_count = len(helper_pids)
+
+    if h_sock_check and helper_pids:
+        out_lines = None
+        lsof_file = os.environ.get("H_LSOF_FILE", "")
+        if lsof_file:
+            try:
+                out_lines = open(lsof_file).read().splitlines()
+            except Exception:
+                out_lines = None
+        else:
+            try:
+                r = subprocess.run(["lsof", "-nP", "-a", "-p", ",".join(str(x) for x in helper_pids),
+                                    "-iTCP", "-sTCP:ESTABLISHED", "-Fpn"],
+                                   capture_output=True, text=True, timeout=10)
+                # lsof exits 1 when nothing matched; that is still a valid (empty) answer.
+                if r.returncode in (0, 1):
+                    out_lines = r.stdout.splitlines()
+            except Exception:
+                out_lines = None
+        if out_lines is not None:
+            helper_sockets = {str(x): 0 for x in helper_pids}
+            cur = None
+            for ln in out_lines:
+                if ln.startswith("p"):
+                    cur = ln[1:].strip()
+                elif ln.startswith("n") and cur in helper_sockets and "->" in ln:
+                    remote = ln[1:].split("->", 1)[1]
+                    port = remote.rsplit(":", 1)[-1] if ":" in remote else ""
+                    if not h_sock_port or port == h_sock_port:
+                        helper_sockets[cur] += 1
+
+same_pid = prev_pid is not None and pid is not None and prev_pid == pid
+prev_bpid = as_int(prev.get("helperBaselinePid"))
+carry = same_pid and prev_bpid == pid
+baseline = as_int(prev.get("helperBaseline")) if carry else None
+stable_count = as_int(prev.get("helperStableCount")) if carry else None
+stable_since = as_int(prev.get("helperStableSinceMs")) if carry else None
+locally_healthy = bool(
+    alive and heartbeat_age is not None and heartbeat_age <= stale_sec
+    and (not boot or boot == "ready") and not frozen_hit
+)
+if helper_count is not None:
+    # The stability clock restarts whenever the count changes or the main pid is not locally healthy.
+    if (not locally_healthy) or stable_count != helper_count or stable_since is None:
+        stable_since = now_ms
+    stable_count = helper_count
+    if locally_healthy and (now_ms - stable_since) / 1000.0 >= h_baseline_sec:
+        if baseline is None or helper_count > baseline:
+            baseline = helper_count
+
+if h_expected_cfg is not None:
+    expected, expected_src = h_expected_cfg, "config"
+elif baseline is not None:
+    expected, expected_src = baseline, "learned"
+else:
+    expected, expected_src = None, None
+
+missing_since = None
+missing_for = None
+helper_hit = False
+if helper_count is not None and expected is not None and expected > 0 and helper_count < expected:
+    pms = as_int(prev.get("helperMissingSinceMs")) if same_pid else None
+    missing_since = pms if pms is not None else now_ms
+    missing_for = (now_ms - missing_since) / 1000.0
+    helper_hit = missing_for >= h_missing_sec
+helper_observe = False
+
 need = False
 reason = "healthy"
 readiness = "local_healthy"
@@ -220,6 +409,21 @@ elif frozen_hit:
     need = True
     reason = "heartbeat_frozen"
     readiness = "heartbeat_frozen"
+elif helper_hit and h_heal:
+    need = True
+    reason = "helper_missing"
+    readiness = "helper_missing"
+elif helper_hit:
+    helper_observe = True
+    reason = "helper_missing"
+    readiness = "helper_missing_observe"
+    hint = (
+        "helper_missing (log-only): Grok Bot is up and its heartbeat is fresh, but only %d of %d "
+        "%s helpers have run for %ds. This matches the S-NEW-D helper-exit signature (2026-10-07). "
+        "Not relaunching because HEAL_ON_HELPER_MISSING=0. If cloud ListMachines.connected=false, "
+        "POST a beacon heal-request, drop grok-bot-local-exec-heal.request, or set HEAL_ON_HELPER_MISSING=1."
+        % (helper_count, expected, h_sub.split("=", 1)[1], int(missing_for))
+    )
 else:
     reason = "healthy"
     readiness = "local_healthy"
@@ -230,6 +434,7 @@ request_exists = os.path.isfile(request_path)
 if request_exists:
     # Force relaunch even when local signals look healthy. Consumed by the shell on heal start.
     need = True
+    helper_observe = False
     reason = "operator_request"
     readiness = "operator_request"
 
@@ -269,6 +474,34 @@ emit("ESCALATE_HINT", SNEW)
 emit("FROZEN_SINCE", "" if frozen_since is None else str(int(frozen_since)))
 emit("OK_SINCE", "" if ok_since is None else str(int(ok_since)))
 emit("UNCHANGED_FOR_SEC", "" if unchanged_for is None else ("%.3f" % unchanged_for))
+emit("HELPER_OBSERVE", "1" if helper_observe else "0")
+emit("HELPER_COUNT", "" if helper_count is None else str(helper_count))
+emit("HELPER_EXPECTED_EFF", "" if expected is None else str(expected))
+emit("HELPER_MISSING_FOR", "" if missing_for is None else str(int(missing_for)))
+
+scan_out = os.environ.get("H_SCAN_OUT", "")
+if scan_out:
+    scan = {
+        "helperCheck": h_check,
+        "healOnHelperMissing": h_heal,
+        "helperCount": helper_count,
+        "helperPids": helper_pids if helper_count is not None else None,
+        "helperExpected": expected,
+        "helperExpectedSource": expected_src,
+        "helperBaseline": baseline,
+        "helperBaselinePid": pid if (baseline is not None or stable_count is not None) else None,
+        "helperStableCount": stable_count,
+        "helperStableSinceMs": stable_since,
+        "helperMissingSinceMs": missing_since,
+        "helperMissingForSec": missing_for,
+        "helperSockets": helper_sockets,
+        "tree": tree,
+    }
+    try:
+        with open(scan_out, "w") as f:
+            json.dump(scan, f)
+    except Exception:
+        pass
 PY
 )"
   # shellcheck disable=SC2086
@@ -433,9 +666,10 @@ write_state() {
   W_PID="${PID:-}" W_AGE="${HEARTBEAT_AGE:-}" W_HB="${HEARTBEAT_AT_MS:-}" \
   W_BOOT="${BOOT:-}" W_READINESS="${READINESS:-}" W_HINT="${ESCALATE_HINT:-}" \
   W_FROZEN="${FROZEN_SINCE:-}" W_OK="${OK_SINCE:-}" W_UNCHANGED="${UNCHANGED_FOR_SEC:-}" \
-  W_KIT="$KIT_VERSION" W_APP="$APP_PATH" \
+  W_KIT="$KIT_VERSION" W_APP="$APP_PATH" W_SCAN="${SCAN_FILE:-}" \
+  W_SNAP_DIR="${HEAL_SNAPSHOT_DIR:-}" W_SNAP_MIN="$HEAL_SNAPSHOT_MIN_SEC" W_SNAP_KEEP="$HEAL_SNAPSHOT_KEEP" \
     "$PYTHON" - "$STATE" <<'PY'
-import json, os, sys, time
+import glob, json, os, sys, time
 
 path = sys.argv[1]
 status = os.environ.get("STATUS", "")
@@ -512,6 +746,79 @@ if action == "relaunch" and reason == "beacon_request":
     data["lastBeaconHealAtMs"] = now_ms
 elif prev.get("lastBeaconHealAtMs"):
     data["lastBeaconHealAtMs"] = prev.get("lastBeaconHealAtMs")
+if action == "relaunch" and reason == "helper_missing":
+    data["lastHelperHealAtMs"] = now_ms
+elif prev.get("lastHelperHealAtMs"):
+    data["lastHelperHealAtMs"] = prev.get("lastHelperHealAtMs")
+
+# Helper-count observer fields (1.5.0). helperCount/helperPids/helperSockets are as observed at
+# the start of this tick (before any relaunch).
+scan = {}
+scan_path = os.environ.get("W_SCAN", "")
+if scan_path:
+    try:
+        with open(scan_path) as f:
+            scan = json.load(f) or {}
+    except Exception:
+        scan = {}
+tree = scan.pop("tree", []) if isinstance(scan, dict) else []
+for k in ("helperCheck", "healOnHelperMissing", "helperCount", "helperPids", "helperExpected",
+          "helperExpectedSource", "helperBaseline", "helperBaselinePid", "helperStableCount",
+          "helperStableSinceMs", "helperMissingSinceMs", "helperMissingForSec", "helperSockets"):
+    data[k] = scan.get(k)
+if action == "relaunch":
+    # New process: the learned baseline and missing clock belong to the old pid.
+    for k in ("helperBaseline", "helperBaselinePid", "helperStableCount", "helperStableSinceMs",
+              "helperMissingSinceMs", "helperMissingForSec"):
+        data[k] = None
+
+# Diagnostics snapshot on non-ok ticks, rate-limited per status+reason.
+for k in ("lastSnapshotAtMs", "lastSnapshot", "lastSnapshotStatus", "lastSnapshotReason"):
+    if prev.get(k) is not None:
+        data[k] = prev.get(k)
+if status not in ("ok", "disabled"):
+    try:
+        min_ms = int(float(os.environ.get("W_SNAP_MIN") or 900) * 1000)
+    except Exception:
+        min_ms = 900000
+    try:
+        keep = max(1, int(os.environ.get("W_SNAP_KEEP") or 20))
+    except Exception:
+        keep = 20
+    last_at = pint(prev.get("lastSnapshotAtMs"))
+    fresh = (
+        prev.get("lastSnapshotStatus") != status
+        or prev.get("lastSnapshotReason") != reason
+        or last_at is None
+        or now_ms - last_at >= min_ms
+    )
+    if fresh:
+        snap_dir = os.environ.get("W_SNAP_DIR") or os.path.dirname(os.path.abspath(path))
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime(now_ms / 1000.0)) + "-%03d" % (now_ms % 1000)
+        name = "GrokBotLocalExecHeal-snap-%s.json" % stamp
+        snap = {k: data.get(k) for k in (
+            "kitVersion", "checkedAtMs", "checkedAtIso", "status", "reason", "action", "pid",
+            "heartbeatAgeSec", "bootOutcome", "readiness", "escalateHint", "helperCount", "helperPids",
+            "helperExpected", "helperExpectedSource", "helperMissingForSec", "helperSockets",
+            "lastHealAtMs", "lastBeaconHealAtMs", "lastHelperHealAtMs")}
+        snap["processTree"] = tree
+        try:
+            os.makedirs(snap_dir, exist_ok=True)
+            with open(os.path.join(snap_dir, name), "w") as f:
+                json.dump(snap, f, indent=2)
+                f.write("\n")
+            data["lastSnapshotAtMs"] = now_ms
+            data["lastSnapshot"] = name
+            data["lastSnapshotStatus"] = status
+            data["lastSnapshotReason"] = reason
+            snaps = sorted(glob.glob(os.path.join(snap_dir, "GrokBotLocalExecHeal-snap-*.json")))
+            for old in snaps[:-keep]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
@@ -534,7 +841,8 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
     exit 0
   fi
 fi
-trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
+SCAN_FILE="$(mktemp "${TMPDIR:-/tmp}/grok-heal-scan.XXXXXX" 2>/dev/null || true)"
+trap 'rmdir "$LOCKDIR" 2>/dev/null || true; [[ -n "${SCAN_FILE:-}" ]] && rm -f "$SCAN_FILE"' EXIT
 
 if [[ -f "$DISABLE" ]]; then
   log "skip: disable file present ($DISABLE)"
@@ -572,6 +880,14 @@ try:
 except Exception:
     print(0)' "$STATE" 2>/dev/null || echo 0)"
 fi
+LAST_HELPER_MS=0
+if [[ -f "$STATE" ]]; then
+  LAST_HELPER_MS="$("$PYTHON" -c 'import json,sys
+try:
+    print(int(json.load(open(sys.argv[1])).get("lastHelperHealAtMs") or 0))
+except Exception:
+    print(0)' "$STATE" 2>/dev/null || echo 0)"
+fi
 if [[ -n "${HEAL_NOW_MS:-}" ]]; then
   NOW_MS="$HEAL_NOW_MS"
 else
@@ -590,6 +906,7 @@ if [[ "${BEACON_PENDING:-0}" == "1" && "${REASON}" != "operator_request" && "${N
   REASON="beacon_request"
   READINESS="beacon_request"
   ESCALATE_HINT=""
+  HELPER_OBSERVE=0
 fi
 
 if [[ "${NEED_HEAL}" == "1" && "$LAST_HEAL_MS" != "0" && "${REASON}" != "operator_request" && "${REASON}" != "beacon_request" ]]; then
@@ -618,14 +935,33 @@ if [[ "${REASON}" == "beacon_request" && "$LAST_BEACON_MS" != "0" ]]; then
   fi
 fi
 
+# One helper_missing relaunch per outage window (same rule as beacon): if the previous helper
+# relaunch did not bring the helper back, stop and escalate instead of looping.
+if [[ "${REASON}" == "helper_missing" && "${NEED_HEAL}" == "1" && "$LAST_HELPER_MS" != "0" ]]; then
+  HELAPSED=$(( (NOW_MS - LAST_HELPER_MS) / 1000 ))
+  if (( HELAPSED < HELPER_RELAUNCH_WINDOW_SEC )); then
+    log "helper_missing: helpers=${HELPER_COUNT:-?}/${HELPER_EXPECTED_EFF:-?} ${HELAPSED}s after a helper relaunch; not relaunching, escalate"
+    READINESS="helper_suppressed"
+    ESCALATE_HINT="helper_second_relaunch: a helper_missing relaunch ${HELAPSED}s ago did not restore the helper count. Stop and escalate to a human; if this app version runs fewer helpers, set HELPER_EXPECTED or HEAL_ON_HELPER_MISSING=0."
+    OK_SINCE=""
+    write_state "helper_suppressed" "helper_missing" "none"
+    exit 0
+  fi
+fi
+
 if [[ "${NEED_HEAL}" != "1" ]]; then
-  log "ok reason=$REASON pid=${PID:-} heartbeat_age=${HEARTBEAT_AGE:-n/a} readiness=$READINESS"
+  if [[ "${HELPER_OBSERVE:-0}" == "1" ]]; then
+    log "observe reason=helper_missing pid=${PID:-} helpers=${HELPER_COUNT:-?}/${HELPER_EXPECTED_EFF:-?} missing_for=${HELPER_MISSING_FOR:-?}s heal_on_helper_missing=0 (log-only)"
+    write_state "observe" "helper_missing" "none"
+    exit 0
+  fi
+  log "ok reason=$REASON pid=${PID:-} heartbeat_age=${HEARTBEAT_AGE:-n/a} readiness=$READINESS helpers=${HELPER_COUNT:-n/a}/${HELPER_EXPECTED_EFF:-n/a}"
   write_state "ok" "$REASON" "none"
   exit 0
 fi
 
 ORIG_REASON="$REASON"
-log "heal start reason=$ORIG_REASON pid=${PID:-none} heartbeat_age=${HEARTBEAT_AGE:-n/a}"
+log "heal start reason=$ORIG_REASON pid=${PID:-none} heartbeat_age=${HEARTBEAT_AGE:-n/a} helpers=${HELPER_COUNT:-n/a}/${HELPER_EXPECTED_EFF:-n/a}"
 
 if [[ -f "$REQUEST" ]]; then
   rm -f "$REQUEST"
