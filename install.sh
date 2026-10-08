@@ -51,6 +51,7 @@ install -m 755 "$SCRIPT_SRC" "$SCRIPT_DST"
 # Keep operator-set EnvironmentVariables across reinstalls.
 # Operator tunables (HEAL_*, *SEC, BEACON_*, custom keys) win over template defaults.
 # Kit-owned PATH comes from the template unless INSTALL_RESET_ENV=1 (full wipe to template).
+# HEAL_TEST_MODE is never preserved and is removed if an existing plist has it.
 # Merge into a temp file in LAUNCH_DIR, lint, then mv into place. Merge failure leaves
 # the existing plist untouched and exits non-zero before any launchctl bootstrap.
 NEW_PLIST="$(mktemp "${LAUNCH_DIR}/${LABEL}.plist.new.XXXXXX")"
@@ -74,11 +75,13 @@ import os, plistlib, sys
 if os.environ.get("INSTALL_TEST_MERGE_FAIL") == "1":
     sys.exit(1)
 
-# PATH is kit-owned (template wins). All other string keys from the existing plist
-# are preserved over template defaults: documented tunables (HEAL_CURSOR, *SEC,
-# HEAL_ON_STUCK_SESSION, BEACON_*), plus any custom operator keys.
+# PATH is kit-owned (template wins). HEAL_TEST_MODE is a test hook and is never
+# preserved, and is stripped if a plist already has it. All other string keys from
+# the existing plist are preserved over template defaults: documented tunables
+# (HEAL_CURSOR, *SEC, HEAL_ON_STUCK_SESSION, BEACON_*), plus any custom operator keys.
 # Set INSTALL_RESET_ENV=1 to wipe back to the template.
 KIT_OWNED = {"PATH"}
+DROP = {"HEAL_TEST_MODE"}
 
 old_path, new_path = sys.argv[1], sys.argv[2]
 try:
@@ -93,11 +96,13 @@ env = new.setdefault("EnvironmentVariables", {})
 
 kept = []
 for k, v in old_env.items():
-    if not isinstance(v, str) or k in KIT_OWNED:
+    if not isinstance(v, str) or k in KIT_OWNED or k in DROP:
         continue
     if env.get(k) != v:
         env[k] = v
         kept.append(k)
+for k in DROP:
+    env.pop(k, None)
 
 with open(new_path, "wb") as f:
     plistlib.dump(new, f)

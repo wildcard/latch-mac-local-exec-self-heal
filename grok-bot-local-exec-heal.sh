@@ -69,7 +69,8 @@ HELPER_MISSING_SEC="${HELPER_MISSING_SEC:-300}"
 # Explicit expected helper count. Empty = use the baseline learned from the healthy state.
 HELPER_EXPECTED="${HELPER_EXPECTED:-}"
 # A count must hold this long, with the main pid locally healthy, before it is learned once.
-# An already-learned baseline is never raised or lowered for that pid. HELPER_EXPECTED wins when set.
+# An already-learned baseline is never lowered. It may rise only when a higher count's decayed
+# time outweighs a 2h half-life (see the histogram below). HELPER_EXPECTED wins when set.
 # Values under 60s would store a blip; non-numeric falls back to 600.
 HELPER_BASELINE_SEC="${HELPER_BASELINE_SEC:-600}"
 HELPER_RELAUNCH_WINDOW_SEC="${HELPER_RELAUNCH_WINDOW_SEC:-3600}"
@@ -151,7 +152,7 @@ run_inspect() {
     "$HEAL_DISABLE_PGREP" \
     "$OK_HINT_SEC" \
     "$HEAL_ON_STUCK_SESSION" <<'PY'
-import json, os, glob, re, sys, subprocess, time, shlex
+import json, math, os, glob, re, sys, subprocess, time, shlex
 
 sup = sys.argv[1]
 stale_sec = float(sys.argv[2])
@@ -234,14 +235,25 @@ if newest:
     heartbeat_age = (now_ms - hb_ms) / 1000.0
     boot = newest[1].get("bootOutcome")
     spid = newest[1].get("pid")
-    if spid and pid and int(spid) != int(pid):
-        reason_bits.append("pid_mismatch_session_vs_desktop_status")
+    spid_n = spid if isinstance(spid, (int, float)) and not isinstance(spid, bool) else None
+    if isinstance(spid_n, float) and not math.isfinite(spid_n):
+        spid_n = None
+    if spid_n is not None and pid is not None:
+        try:
+            if int(spid_n) != int(pid):
+                reason_bits.append("pid_mismatch_session_vs_desktop_status")
+        except Exception:
+            pass
     if newest[1].get("quitRequestedAtMs"):
         reason_bits.append("quit_requested")
 
 # Allowlisted copies for diagnostics. Unknown keys (installId, tokens, paths) are dropped.
 def pub_num(v):
+    # inf/nan must not reach int() or the snapshot. A non-finite field used to
+    # abort the whole tick (set -e, no last.json, no heal).
     if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
         return None
     return v
 
@@ -267,40 +279,47 @@ def pub_child_deaths(v):
         if isinstance(val, bool) or val is None:
             out[key] = val
         elif isinstance(val, (int, float)):
+            if isinstance(val, float) and not math.isfinite(val):
+                return {"count": len(v), "redacted": True}
             out[key] = val
         else:
             return {"count": len(v), "redacted": True}
     return out
 
 desktop_pub = None
-if isinstance(ds, dict):
-    desktop_pub = {}
-    if pub_num(ds.get("version")) is not None:
-        desktop_pub["version"] = pub_num(ds.get("version"))
-    if pub_num(ds.get("pid")) is not None:
-        desktop_pub["pid"] = int(ds.get("pid"))
-    av = pub_token(ds.get("appVersion"), 32)
-    if av:
-        desktop_pub["appVersion"] = av
-    if pub_num(ds.get("startedAtMs")) is not None:
-        desktop_pub["startedAtMs"] = int(ds.get("startedAtMs"))
-    if isinstance(ds.get("signedIn"), bool):
-        desktop_pub["signedIn"] = ds.get("signedIn")
-
 dune_pub = None
-if newest:
-    j = newest[1]
-    dune_pub = {}
-    if pub_num(j.get("pid")) is not None:
-        dune_pub["pid"] = int(j.get("pid"))
-    dune_pub["heartbeatAtMs"] = hb_ms
-    bo = pub_token(boot, 32) if boot else None
-    if bo:
-        dune_pub["bootOutcome"] = bo
-    if isinstance(j.get("mainFaultSeen"), bool):
-        dune_pub["mainFaultSeen"] = j.get("mainFaultSeen")
-    if "childDeaths" in j:
-        dune_pub["childDeaths"] = pub_child_deaths(j.get("childDeaths"))
+try:
+    if isinstance(ds, dict):
+        desktop_pub = {}
+        if pub_num(ds.get("version")) is not None:
+            desktop_pub["version"] = pub_num(ds.get("version"))
+        if pub_num(ds.get("pid")) is not None:
+            desktop_pub["pid"] = int(ds.get("pid"))
+        av = pub_token(ds.get("appVersion"), 32)
+        if av:
+            desktop_pub["appVersion"] = av
+        if pub_num(ds.get("startedAtMs")) is not None:
+            desktop_pub["startedAtMs"] = int(ds.get("startedAtMs"))
+        if isinstance(ds.get("signedIn"), bool):
+            desktop_pub["signedIn"] = ds.get("signedIn")
+
+    if newest:
+        j = newest[1]
+        dune_pub = {}
+        if pub_num(j.get("pid")) is not None:
+            dune_pub["pid"] = int(j.get("pid"))
+        dune_pub["heartbeatAtMs"] = hb_ms
+        bo = pub_token(boot, 32) if boot else None
+        if bo:
+            dune_pub["bootOutcome"] = bo
+        if isinstance(j.get("mainFaultSeen"), bool):
+            dune_pub["mainFaultSeen"] = j.get("mainFaultSeen")
+        if "childDeaths" in j:
+            dune_pub["childDeaths"] = pub_child_deaths(j.get("childDeaths"))
+except Exception:
+    # Diagnostics are a copy of the decision. They must not block a heal.
+    desktop_pub = None
+    dune_pub = None
 
 def as_int(v):
     try:
@@ -354,15 +373,22 @@ tree = []
 app_path = (os.environ.get("H_APP_PATH", "") or "").rstrip("/")
 h_subtype_value = h_sub.split("=", 1)[1]
 
+# comm is an argv[0] the process can rewrite. Only the real Grok Bot names are stored.
+# "Grok Bot Helper (Renderer)" is a known comm; anything else, including a secret stuffed
+# into the name, becomes "other".
+_KNOWN_EXE = re.compile(r"^Grok Bot(?: Helper(?: \([A-Za-z0-9]{1,24}\))?)?$")
+_SNAP_TYPES = ("utility", "renderer", "gpu-process", "zygote", "other")
+
 def exe_from_comm(comm):
-    # ps comm only. Never slice the command line: a URL or curl header can contain
-    # "/Contents/MacOS/" or " --" and must not become the stored exe name.
     base = os.path.basename((comm or "").strip())
-    if not base or len(base) > 128:
-        return "other"
-    if any(c in base for c in "/\\?&=@\"'\n\r\t"):
-        return "other"
-    return base
+    if _KNOWN_EXE.match(base):
+        return base
+    return "other"
+
+def snap_type(value):
+    if value in _SNAP_TYPES:
+        return value
+    return "other"
 
 def safe_flag(value):
     if value is None:
@@ -372,9 +398,11 @@ def safe_flag(value):
     return None
 
 def under_app(command):
+    # argv0 must be the app bundle's Contents tree. A shell that only quotes
+    # "$APP/Contents/..." later in the command is not a helper.
     if not command or not app_path:
         return False
-    return command.startswith(app_path + "/") or command.startswith(app_path + " ")
+    return command.startswith(app_path + "/Contents/")
 
 def parse_ps_line(ln):
     # "pid ppid etime comm \\t command". comm may contain spaces. command is optional
@@ -401,71 +429,78 @@ def allowlisted_flags(command):
             psub = safe_flag(tok[len("--utility-sub-type="):])
     return ptype, psub
 
-if h_check and alive and pid:
-    rows = None
-    ps_file = os.environ.get("H_PS_FILE", "")
-    if ps_file:
-        try:
-            rows = []
-            for ln in open(ps_file).read().splitlines():
-                parsed = parse_ps_line(ln)
-                if parsed:
-                    rows.append(parsed)
-        except Exception:
-            rows = None
-    else:
-        try:
-            ps_bin = os.environ.get("H_PS_BIN") or "/bin/ps"
-            # Two calls on purpose. exe comes from comm, and the command line is
-            # read only for app-path processes. One ps line cannot split those
-            # safely when comm contains spaces (slicing it would put argv back
-            # into the snapshot). A helper that starts or exits between the two
-            # calls can be miscounted for this tick only. HELPER_MISSING_SEC and
-            # HELPER_BASELINE_SEC are both much longer than one tick, so that
-            # skew cannot by itself open helper_missing or become the learned baseline.
-            rc = subprocess.run([ps_bin, "-axww", "-o", "pid=,ppid=,etime=,comm="],
-                                capture_output=True, text=True, timeout=10)
-            rcmd = subprocess.run([ps_bin, "-axww", "-o", "pid=,command="],
-                                  capture_output=True, text=True, timeout=10)
-            if rc.returncode == 0 and rcmd.returncode == 0:
-                commands = {}
-                for ln in rcmd.stdout.splitlines():
-                    m = re.match(r"\s*(\d+)\s+(.*)$", ln)
-                    if m:
-                        commands[int(m.group(1))] = m.group(2).strip()
+try:
+    if h_check and alive and pid:
+        rows = None
+        ps_file = os.environ.get("H_PS_FILE", "")
+        if ps_file:
+            try:
                 rows = []
-                for ln in rc.stdout.splitlines():
-                    m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", ln)
-                    if not m:
-                        continue
-                    p_ = int(m.group(1))
-                    cmd = commands.get(p_, "")
-                    # Keep the command string only long enough to classify app-path processes.
-                    if not under_app(cmd):
-                        cmd = ""
-                    rows.append((p_, int(m.group(2)), m.group(3), m.group(4).strip(), cmd))
-        except Exception:
-            rows = None
-    if rows is not None:
-        helper_count = 0
-        for p_, pp_, etime, comm, cmd in rows:
-            if p_ != pid and pp_ != pid:
-                continue
-            in_app = under_app(cmd)
-            if in_app:
-                ptype, psub = allowlisted_flags(cmd)
-                if ptype is None and psub is None:
-                    ptype = "other"
-            else:
-                ptype, psub = "other", None
-                cmd = ""
-            exe = exe_from_comm(comm)
-            tree.append({"pid": p_, "ppid": pp_, "etime": etime, "exe": exe,
-                         "type": ptype, "subType": psub})
-            if pp_ == pid and in_app and exe.startswith(h_name) and psub == h_subtype_value:
-                helper_pids.append(p_)
-        helper_pids.sort()
-        helper_count = len(helper_pids)
+                for ln in open(ps_file).read().splitlines():
+                    parsed = parse_ps_line(ln)
+                    if parsed:
+                        rows.append(parsed)
+            except Exception:
+                rows = None
+        else:
+            try:
+                ps_bin = os.environ.get("H_PS_BIN") or "/bin/ps"
+                # Two calls on purpose. exe comes from comm, and the command line is
+                # read only for app-path processes. One ps line cannot split those
+                # safely when comm contains spaces (slicing it would put argv back
+                # into the snapshot). A helper that starts or exits between the two
+                # calls can be miscounted for this tick only. HELPER_MISSING_SEC and
+                # HELPER_BASELINE_SEC are both much longer than one tick, so that
+                # skew cannot by itself open helper_missing or become the learned baseline.
+                rc = subprocess.run([ps_bin, "-axww", "-o", "pid=,ppid=,etime=,comm="],
+                                    capture_output=True, text=True, timeout=10)
+                rcmd = subprocess.run([ps_bin, "-axww", "-o", "pid=,command="],
+                                      capture_output=True, text=True, timeout=10)
+                if rc.returncode == 0 and rcmd.returncode == 0:
+                    commands = {}
+                    for ln in rcmd.stdout.splitlines():
+                        m = re.match(r"\s*(\d+)\s+(.*)$", ln)
+                        if m:
+                            commands[int(m.group(1))] = m.group(2).strip()
+                    rows = []
+                    for ln in rc.stdout.splitlines():
+                        m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", ln)
+                        if not m:
+                            continue
+                        p_ = int(m.group(1))
+                        cmd = commands.get(p_, "")
+                        # Keep the command string only long enough to classify app-path processes.
+                        if not under_app(cmd):
+                            cmd = ""
+                        rows.append((p_, int(m.group(2)), m.group(3), m.group(4).strip(), cmd))
+            except Exception:
+                rows = None
+        if rows is not None:
+            helper_count = 0
+            for p_, pp_, etime, comm, cmd in rows:
+                if p_ != pid and pp_ != pid:
+                    continue
+                in_app = under_app(cmd)
+                if in_app:
+                    ptype, psub = allowlisted_flags(cmd)
+                    ptype = snap_type(ptype)
+                else:
+                    ptype, psub = "other", None
+                    cmd = ""
+                exe = exe_from_comm(comm)
+                tree.append({"pid": p_, "ppid": pp_, "etime": etime, "exe": exe,
+                             "type": ptype, "subType": psub})
+                if pp_ == pid and in_app and exe.startswith(h_name) and psub == h_subtype_value:
+                    helper_pids.append(p_)
+            helper_pids.sort()
+            helper_count = len(helper_pids)
+except Exception:
+    # A helper-scan failure must not abort the tick. Unknown count is not missing.
+    helper_count = None
+    helper_pids = []
+    helper_sockets = None
+    tree = []
+
 
 helper_none_seen = None
 if helper_count is not None:
@@ -502,6 +537,21 @@ else:
     baseline = None
     stable_count = None
     stable_since = None
+# Decayed time-at-count for this pid. Not carried across a pid change: a new
+# process starts its own histogram. Weights are seconds, half-life 2h.
+hist = {}
+hist_at = None
+if same_pid and isinstance(prev.get("helperHist"), dict):
+    for hk, hw in prev.get("helperHist").items():
+        try:
+            ik = int(hk)
+            fw = float(hw)
+        except Exception:
+            continue
+        if isinstance(hw, bool) or ik <= 0 or not math.isfinite(fw) or fw <= 0:
+            continue
+        hist[str(ik)] = fw
+    hist_at = as_int(prev.get("helperHistAtMs"))
 locally_healthy = bool(
     alive and heartbeat_age is not None and heartbeat_age <= stale_sec
     and (not boot or boot == "ready") and not frozen_hit
@@ -510,12 +560,56 @@ if helper_count is not None:
     if (not locally_healthy) or stable_count != helper_count or stable_since is None:
         stable_since = now_ms
     stable_count = helper_count
-    # Learn once. Never raise or lower a baseline that is already set.
+    # Learn once while nothing is stored. Never lower an existing baseline.
+    # A higher count can replace it only after its decayed time outweighs both
+    # the stored weight and a 2h half-life, so a late second helper becomes the
+    # baseline and a transient third helper does not.
     if (
         baseline is None
         and locally_healthy
         and helper_count > 0
         and (now_ms - stable_since) / 1000.0 >= h_baseline_sec
+    ):
+        baseline = helper_count
+
+HALF_LIFE_SEC = 7200.0
+
+def decayed_mass(dt_sec):
+    if dt_sec <= 0:
+        return 0.0
+    lam = math.log(2.0) / HALF_LIFE_SEC
+    return (1.0 - math.exp(-lam * dt_sec)) / lam
+
+if helper_count is not None:
+    dt = 0.0
+    if hist_at is not None:
+        dt = max(0.0, (now_ms - hist_at) / 1000.0)
+        if dt > 0 and hist:
+            factor = 0.5 ** (dt / HALF_LIFE_SEC)
+            hist = dict((k, w * factor) for k, w in hist.items() if w * factor >= 1.0)
+    # No stored histogram yet (older state, or the first tick on this pid):
+    # give the current baseline a 2h prior so one stable window cannot raise it.
+    if prev_baseline is not None and not hist and hist_at is None and baseline is not None:
+        hist[str(int(baseline))] = float(HALF_LIFE_SEC)
+    stable_for = 0.0
+    credit = 0.0
+    if locally_healthy and helper_count > 0 and stable_since is not None and stable_count == helper_count:
+        stable_for = max(0.0, (now_ms - stable_since) / 1000.0)
+        if hist_at is None:
+            credit = decayed_mass(stable_for)
+        else:
+            credit = decayed_mass(min(dt, stable_for))
+    if credit > 0:
+        hk = str(helper_count)
+        hist[hk] = hist.get(hk, 0.0) + credit
+    hist_at = now_ms
+    if (
+        h_expected_cfg is None
+        and baseline is not None
+        and locally_healthy
+        and helper_count > baseline
+        and stable_for >= h_baseline_sec
+        and hist.get(str(helper_count), 0.0) > max(hist.get(str(int(baseline)), 0.0), float(HALF_LIFE_SEC))
     ):
         baseline = helper_count
 
@@ -620,7 +714,9 @@ if (not need) and str(reason).startswith("healthy"):
             "grok-bot-local-exec-heal.request on this Mac (a disconnected remote agent cannot drop that file). "
             "Sleep, lid, and network are outside this heal."
         )
-if helper_none_seen and str(reason).startswith("healthy"):
+# The long-ok S-NEW-D hint wins when both apply. Zero helpers on a long healthy
+# streak is still the cloud-invisible case; helperNoneSeen stays set either way.
+if helper_none_seen and str(reason).startswith("healthy") and not hint:
     hint = (
         "helper_none_seen: no node.mojom.NodeService helper is a child of this pid. "
         "A renamed helper binary would look the same, so helper_missing cannot learn a baseline of 0. "
@@ -710,6 +806,8 @@ if scan_out:
         "helperMissingForSec": missing_for,
         "helperSockets": helper_sockets,
         "helperFloorPending": floor_pending,
+        "helperHist": dict((k, round(v, 1)) for k, v in hist.items()) if hist else None,
+        "helperHistAtMs": hist_at,
         "helperNoneSeen": helper_none_seen,
         "desktopStatus": desktop_pub,
         "dune": dune_pub,
@@ -983,8 +1081,16 @@ tree = scan.pop("tree", []) if isinstance(scan, dict) else []
 for k in ("helperCheck", "healOnHelperMissing", "helperCount", "helperPids", "helperExpected",
           "helperExpectedSource", "helperBaseline", "helperBaselinePid", "helperStableCount",
           "helperStableSinceMs", "helperMissingSinceMs", "helperMissingForSec", "helperSockets",
-          "helperFloorPending", "helperNoneSeen"):
+          "helperFloorPending", "helperHist", "helperHistAtMs", "helperNoneSeen"):
     data[k] = scan.get(k)
+# .disable and app_missing return before the scan. An empty scan must not wipe a
+# learned baseline or an open missing clock. A relaunch still has its own rules below.
+if action != "relaunch" and "helperCheck" not in scan:
+    for k in ("helperExpected", "helperExpectedSource", "helperBaseline", "helperBaselinePid",
+              "helperStableCount", "helperStableSinceMs", "helperMissingSinceMs",
+              "helperMissingForSec", "helperFloorPending", "helperHist", "helperHistAtMs"):
+        if k in prev and data.get(k) is None:
+            data[k] = prev.get(k)
 def short_interval_open(scan_obj, prev_obj):
     # This tick saw the count below expected.
     if scan_obj.get("helperMissingSinceMs") is not None:
@@ -1011,6 +1117,8 @@ def arm_helper_floor(data_obj, prev_obj, new_pid):
     data_obj["helperStableSinceMs"] = None
     data_obj["helperMissingSinceMs"] = None
     data_obj["helperMissingForSec"] = None
+    data_obj["helperHist"] = None
+    data_obj["helperHistAtMs"] = None
 
 if action == "relaunch" and (reason == "helper_missing" or short_interval_open(scan, prev)):
     # helper_missing, and also beacon / operator / heartbeat_stale / process_down
@@ -1019,11 +1127,13 @@ if action == "relaunch" and (reason == "helper_missing" or short_interval_open(s
     arm_helper_floor(data, prev, pint(pid))
 elif action == "relaunch":
     for k in ("helperBaseline", "helperBaselinePid", "helperStableCount", "helperStableSinceMs",
-              "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending"):
+              "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending",
+              "helperHist", "helperHistAtMs"):
         data[k] = None
 
 # Diagnostics snapshot on non-ok ticks, rate-limited per status+reason.
-for k in ("lastSnapshotAtMs", "lastSnapshot", "lastSnapshotStatus", "lastSnapshotReason"):
+for k in ("lastSnapshotAtMs", "lastSnapshot", "lastSnapshotStatus", "lastSnapshotReason",
+          "snapshotBackoffMs"):
     if prev.get(k) is not None:
         data[k] = prev.get(k)
 if status not in ("ok", "disabled"):
@@ -1043,12 +1153,19 @@ if status not in ("ok", "disabled"):
         return text
 
     last_at = pint(prev.get("lastSnapshotAtMs"))
-    fresh = (
-        prev.get("lastSnapshotStatus") != status
-        or snap_key(prev.get("lastSnapshotReason")) != snap_key(reason)
-        or last_at is None
-        or now_ms - last_at >= min_ms
+    # Same status+reason backs off: 900s, then double, capped at 4h.
+    cap_ms = 4 * 3600 * 1000
+    same_class = (
+        prev.get("lastSnapshotStatus") == status
+        and snap_key(prev.get("lastSnapshotReason")) == snap_key(reason)
+        and last_at is not None
     )
+    gap_ms = min_ms
+    if same_class:
+        stored_gap = pint(prev.get("snapshotBackoffMs"))
+        if stored_gap is not None and stored_gap >= min_ms:
+            gap_ms = stored_gap
+    fresh = (not same_class) or (now_ms - last_at >= gap_ms)
     if fresh:
         snap_dir = os.environ.get("W_SNAP_DIR") or os.path.dirname(os.path.abspath(path))
         stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime(now_ms / 1000.0)) + "-%03d" % (now_ms % 1000)
@@ -1077,6 +1194,10 @@ if status not in ("ok", "disabled"):
             data["lastSnapshot"] = name
             data["lastSnapshotStatus"] = status
             data["lastSnapshotReason"] = reason
+            if same_class:
+                data["snapshotBackoffMs"] = min(gap_ms * 2, cap_ms)
+            else:
+                data["snapshotBackoffMs"] = min_ms
             snaps = sorted(glob.glob(os.path.join(snap_dir, "GrokBotLocalExecHeal-snap-*.json")))
             for old in snaps[:-keep]:
                 try:
@@ -1208,6 +1329,9 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
   fi
 fi
 SCAN_FILE="$(mktemp "${TMPDIR:-/tmp}/grok-heal-scan.XXXXXX" 2>/dev/null || true)"
+if [[ -z "${SCAN_FILE:-}" ]]; then
+  log "warning: mktemp failed; helper fields will not be recorded from this tick's scan"
+fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true; [[ -n "${SCAN_FILE:-}" ]] && rm -f "$SCAN_FILE"' EXIT
 
 if [[ -f "$DISABLE" ]]; then
@@ -1275,6 +1399,29 @@ if [[ "${BEACON_PENDING:-0}" == "1" && "${REASON}" != "operator_request" && "${N
   HELPER_OBSERVE=0
 fi
 
+# Floor suppression before cooldown. Both can apply after a recent heal; the status
+# should say the count is still short, not that the 300s cooldown is the reason.
+if [[ "${REASON}" == "helper_missing" && "${NEED_HEAL}" == "1" ]]; then
+  HELPER_SUPPRESS=0
+  HELAPSED=0
+  if [[ "$LAST_HELPER_MS" != "0" ]]; then
+    HELAPSED=$(( (NOW_MS - LAST_HELPER_MS) / 1000 ))
+  fi
+  if [[ "${HELPER_FLOOR_PENDING:-0}" == "1" ]]; then
+    HELPER_SUPPRESS=1
+  elif [[ "$LAST_HELPER_MS" != "0" && "$HELAPSED" -lt "$HELPER_RELAUNCH_WINDOW_SEC" ]]; then
+    HELPER_SUPPRESS=1
+  fi
+  if [[ "$HELPER_SUPPRESS" == "1" ]]; then
+    log "helper_missing: helpers=${HELPER_COUNT:-?}/${HELPER_EXPECTED_EFF:-?} still short ${HELAPSED}s after a helper relaunch; not relaunching, escalate"
+    READINESS="helper_suppressed"
+    ESCALATE_HINT="helper_suppressed: the helper count is still below the floor after a helper_missing relaunch. Staying suppressed (not learning the lower count, not relaunching again) until the live count meets the floor."
+    OK_SINCE=""
+    write_state "helper_suppressed" "helper_missing" "none"
+    exit 0
+  fi
+fi
+
 if [[ "${NEED_HEAL}" == "1" && "$LAST_HEAL_MS" != "0" && "${REASON}" != "operator_request" && "${REASON}" != "beacon_request" ]]; then
   ELAPSED=$(( (NOW_MS - LAST_HEAL_MS) / 1000 ))
   if (( ELAPSED < COOLDOWN_SEC )); then
@@ -1297,31 +1444,6 @@ if [[ "${REASON}" == "beacon_request" && "$LAST_BEACON_MS" != "0" ]]; then
     ESCALATE_HINT="beacon_second_request: a beacon relaunch ${BELAPSED}s ago did not restore the link. Stop and escalate to a human; relaunch does not fix network, sign-in, or WAN."
     OK_SINCE=""
     write_state "beacon_suppressed" "beacon_request" "none"
-    exit 0
-  fi
-fi
-
-# One helper_missing relaunch until the count meets the floor again. While the count is
-# still short, stay suppressed even after HELPER_RELAUNCH_WINDOW_SEC — do not relaunch
-# hourly and do not learn the lower count. A new outage (floor met, then another drop)
-# can relaunch once the window has elapsed.
-if [[ "${REASON}" == "helper_missing" && "${NEED_HEAL}" == "1" ]]; then
-  HELPER_SUPPRESS=0
-  HELAPSED=0
-  if [[ "$LAST_HELPER_MS" != "0" ]]; then
-    HELAPSED=$(( (NOW_MS - LAST_HELPER_MS) / 1000 ))
-  fi
-  if [[ "${HELPER_FLOOR_PENDING:-0}" == "1" ]]; then
-    HELPER_SUPPRESS=1
-  elif [[ "$LAST_HELPER_MS" != "0" && "$HELAPSED" -lt "$HELPER_RELAUNCH_WINDOW_SEC" ]]; then
-    HELPER_SUPPRESS=1
-  fi
-  if [[ "$HELPER_SUPPRESS" == "1" ]]; then
-    log "helper_missing: helpers=${HELPER_COUNT:-?}/${HELPER_EXPECTED_EFF:-?} still short ${HELAPSED}s after a helper relaunch; not relaunching, escalate"
-    READINESS="helper_suppressed"
-    ESCALATE_HINT="helper_suppressed: the helper count is still below the floor after a helper_missing relaunch. Staying suppressed (not learning the lower count, not relaunching again) until the live count meets the floor."
-    OK_SINCE=""
-    write_state "helper_suppressed" "helper_missing" "none"
     exit 0
   fi
 fi
