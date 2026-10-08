@@ -1,0 +1,9 @@
+{
+  "pid": 4242,
+  "bootOutcome": "ready",
+  "heartbeatOffsetMs": -20000,
+  "mainFaultSeen": false,
+  "childDeaths": {},
+  "installId": "should-not-appear",
+  "gatewayToken": "should-not-appear"
+}

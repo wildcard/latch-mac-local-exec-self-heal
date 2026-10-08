@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "pid": 4242,
+  "appVersion": "0.68.1",
+  "startedAtMs": 1700000000000,
+  "signedIn": true,
+  "installId": "should-not-appear",
+  "token": "should-not-appear"
+}

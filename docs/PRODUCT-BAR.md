@@ -1,9 +1,9 @@
 # Product bar — Mac local-exec self-heal
 
 **Set:** 2026-10-02 ~11:01 PM PT; transport locks ~11:04 and ~11:07 PM PT; modes pack ~11:35 PM PT  
-**Applies to:** kit **1.4.2** (current). The worker-beacon inbox is deployed and live on the operator's personal Cloudflare; its tokens are Worker secrets plus a token file outside the repo.
+**Applies to:** kit **1.5.0** (current). The worker-beacon inbox is deployed and live on the operator's personal Cloudflare; its tokens are Worker secrets plus a token file outside the repo.
 
-**Honest status against bar 1:** S-NEW-D is covered only when a bot or operator POSTs a heal-request to the beacon. Nothing auto-detects it. Prove C (beacon path) and the live `.disable` check passed; Prove D (a real silent disconnect healed via the beacon) is open. See [CAPABILITY-CHECKS.md](CAPABILITY-CHECKS.md).
+**Honest status against bar 1:** S-NEW-D is covered when an agent POSTs a heal-request to the beacon. The runbook's immediate-relaunch rule is a proposal, not kit behavior ([agent loop](1.5.0/AGENT-LOOP.md)). 1.5.0 adds a Mac-local **observer** for one S-NEW-D cause (helper exit, `helper_missing`), log-only by default; it is a correlation, not a cloud signal. Prove D **failed** 2026-10-07 because no agent posted ([record](1.5.0/PROVE-D-FAIL-2026-10-07.md)). Prove C (beacon path) and the live `.disable` check passed; Prove D (a real silent disconnect healed via the beacon) is open. See [CAPABILITY-CHECKS.md](CAPABILITY-CHECKS.md).
 
 ## Bars
 
@@ -19,7 +19,7 @@
 The inbox uses the operator's **personal Cloudflare** account and **Wrangler**. Not an employer Cloudflare account. Not a blog post. This repository holds the Worker **source** and a `wrangler.toml` with no account id; it never holds keys, tokens, or secrets.
 
 4. **Prefer a native Mac signal so bots do not have to declare the machine down.**  
-   The 2026-10-02 dig found no such file. The ask is for Grok Bot to write connection state locally (working name `local-exec-daemon-connection.json`: `connected`, `lastSseAtMs`, `reason`) when the daemon’s SSE session connects, drops, or stalls. If that signal is proven against a real `connected=false` window and a healthy-hour baseline, the LaunchAgent heals on it and `cloudConnectObservable` may become true **for that signal only**. Until then the flag stays `false`.
+   The 2026-10-02 dig found no such file. 1.5.0's helper-count observer is a proxy for one outage (a NodeService helper exited), log-only by default, and is not that signal. The ask is for Grok Bot to write a non-secret `local-exec-status.json` (`rosterConnected`, `stream`, `reason`, no token). Contract and the explicit non-goals until it exists: [1.5.0/PRODUCT-STATUS-FILE.md](1.5.0/PRODUCT-STATUS-FILE.md). If that signal is proven against a real `connected=false` window and a healthy-hour baseline, the LaunchAgent heals on it and `cloudConnectObservable` may become true **for that signal only**. Until then the flag stays `false`.
 
 ## Modes pack (2026-10-02 ~11:35 PM PT)
 
@@ -41,11 +41,11 @@ Present the trade-offs; let the user pick mode(s). Worker source and Mac poll ho
 | `bootOutcome` set and not `ready` | Relaunch |
 | Same pid, same `heartbeatAtMs` ≥ 120s | Relaunch (`heartbeat_frozen`) |
 | Keyboard / on-Mac `.request` file | Relaunch, cooldown bypass |
-| S-NEW-D | **Does not relaunch.** `escalateHint` after 300s of local-ok. Operator restart. |
+| S-NEW-D | **Does not relaunch.** `escalateHint` after 300s of local-ok. Operator restart. 1.5.0 can *observe* a helper-exit shape (`helper_missing`, log-only unless `HEAL_ON_HELPER_MISSING=1`). That is not detection of `ListMachines.connected`. |
 
 ## Non-negotiable honesty
 
-- Do not claim S-NEW-D auto-detection. Prove D stays open until a real disconnect is healed via the beacon without a hand-edited `last.json`.
+- Do not claim S-NEW-D auto-detection of `ListMachines.connected`. The 1.5.0 helper observer is a correlation and ships log-only. Prove D stays open until a real disconnect is healed via the beacon or an opted-in helper relaunch, without a hand-edited `last.json`.
 - Do not treat “kill the process” as proof of S-NEW-D.
 - Disable file wins over beacon and over `.request`. A beacon request received while disabled stays queued; it is not ack-and-dropped.
 - Keys stay out of this repo.

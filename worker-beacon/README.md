@@ -14,7 +14,7 @@ State lives in one Durable Object per machine so `jti` replay and rate limits ar
 
 ## Status
 
-Deployed and live on the operator's personal Cloudflare at https://latch-worker-beacon.kadosh.workers.dev. Tokens are set as Worker secrets and kept in a token file outside the repo, never in git. Prove C passed on the beacon path (`docs/1.4.0/PROVE-C-2026-10-05.md`).
+Deployed and live on the operator's personal Cloudflare at https://<operator-worker-host>. Tokens are set as Worker secrets and kept in a token file outside the repo, never in git. Prove C passed on the beacon path (`docs/1.4.0/PROVE-C-2026-10-05.md`).
 
 ## Deploy (operator, personal Cloudflare only)
 
