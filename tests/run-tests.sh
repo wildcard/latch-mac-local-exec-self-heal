@@ -924,6 +924,25 @@ t_helper_pid_change_resets() {
   grep -q "heal start" "$HEAL_LOG" && die "log-only pid change relaunched" || true
 }
 
+t_helper_config_expected_pid_change_keeps_floor() {
+  # Operator HELPER_EXPECTED and no learned baseline. A pid change while short
+  # must keep that expected count, the missing clock, and a pending floor.
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HELPER_EXPECTED=2
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"observe\",\"pid\":9999,\"helperExpected\":2,\"helperExpectedSource\":\"config\",\"helperFloorPending\":true,\"helperMissingSinceMs\":$((now - 900000))}"
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "reason=$(jget reason)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "expected=$(jget helperExpected)"
+  [[ "$(jget helperExpectedSource)" == "config" ]] || die "src=$(jget helperExpectedSource)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned a baseline on the short pid: $(jget helperBaseline)"
+  [[ "$(jget helperCount)" == "1" ]] || die "count=$(jget helperCount)"
+  [[ "$(jget helperMissingSinceMs)" == "$((now - 900000))" ]] || die "clock restarted: $(jget helperMissingSinceMs)"
+  [[ "$(jget helperFloorPending)" == "True" ]] || die "floor dropped: $(jget helperFloorPending)"
+}
+
 t_helper_pid_change_healthy_resets() {
   # No open missing interval and no pending floor: a new pid starts learning over.
   local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
@@ -988,19 +1007,25 @@ t_helper_sockets_counts_no_addresses() {
   seed_helper_missing "$now" 400000
   run_heal
   [[ "$(jget helperSockets)" == "None" ]] || die "socket check not off"
-  # lsof exit 1 is an error, not "zero sockets".
+  # Exit 1 with stderr is a real error. macOS lsof exits 1 with no output when
+  # none of the pids has an ESTABLISHED socket; that is {pid: 0}, not null.
   export HELPER_SOCKET_CHECK=1
   export HELPER_LSOF_FILE=""
   mkdir -p "$TMP/bin"
-  printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/lsof"
+  printf '#!/bin/sh\necho "lsof: fixture error" >&2\nexit 1\n' > "$TMP/bin/lsof"
   chmod +x "$TMP/bin/lsof"
-  # Production calls /usr/sbin/lsof. Test mode may point that slot at a stub.
   export HELPER_LSOF_BIN="$TMP/bin/lsof"
   rm -f "$HEAL_STATE"
   seed_helper_missing "$now" 400000
   run_heal
   [[ "$(jget status)" == "observe" ]] || die "lsof-error status=$(jget status)"
-  [[ "$(jget helperSockets)" == "None" ]] || die "lsof exit 1 stored $(jget helperSockets)"
+  [[ "$(jget helperSockets)" == "None" ]] || die "lsof stderr stored $(jget helperSockets)"
+  printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/lsof"
+  rm -f "$HEAL_STATE"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "lsof-nomatch status=$(jget status)"
+  [[ "$(jraw helperSockets)" == '{"4300": 0, "4301": 0}' ]] || die "lsof no-match sockets=$(jraw helperSockets)"
 }
 
 t_snapshot_rate_limited_and_pruned() {
@@ -1571,6 +1596,7 @@ run_case T-helper-log-only-beacon-still-heals t_helper_log_only_beacon_still_hea
 run_case T-helper-disable-wins t_helper_disable_wins
 run_case T-helper-expected-override t_helper_expected_override
 run_case T-helper-pid-change-resets t_helper_pid_change_resets
+run_case T-helper-config-expected-pid-change-keeps-floor t_helper_config_expected_pid_change_keeps_floor
 run_case T-helper-pid-change-healthy-resets t_helper_pid_change_healthy_resets
 run_case T-helper-floor-met-allows-new-outage t_helper_floor_met_allows_new_outage
 run_case T-helper-dip-recovers-within-grace t_helper_dip_recovers_within_grace

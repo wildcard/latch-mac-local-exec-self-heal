@@ -122,7 +122,7 @@ cat ~/Library/Logs/GrokBotLocalExecHeal-last.json
 | `HELPER_EXPECTED` | *(empty)* | Explicit expected count. When set it wins over the learned baseline. Empty = learn once per pid. Not pinned by the plist template |
 | `HELPER_BASELINE_SEC` | `600` | Stable-and-healthy time before a count **> 0** is learned once. An existing baseline is never raised or lowered |
 | `HELPER_RELAUNCH_WINDOW_SEC` | `3600` | After the floor has been met, minimum gap before another `helper_missing` relaunch. Non-numeric values use 3600; values below 1 clamp to 1. While the count is still short this window does not re-arm a relaunch |
-| `HELPER_SOCKET_CHECK` / `HELPER_SOCKET_PORT` | `1` / `443` | Observe-only established-socket counts, and only on snapshot ticks. `lsof` failure leaves `helperSockets` null |
+| `HELPER_SOCKET_CHECK` / `HELPER_SOCKET_PORT` | `1` / `443` | Observe-only established-socket counts, and only on snapshot ticks. `lsof` exit 1 with empty stderr is 0 sockets per helper; any other failure leaves `helperSockets` null |
 | `HELPER_CHECK` | `1` | `0` disables the scan |
 | `HEAL_SNAPSHOT_MIN_SEC` / `HEAL_SNAPSHOT_KEEP` / `HEAL_SNAPSHOT_DIR` | `900` / `20` / logs dir | Snapshot rate limit, retention, location |
 

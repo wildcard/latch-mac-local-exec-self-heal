@@ -409,6 +409,13 @@ if h_check and alive and pid:
     else:
         try:
             ps_bin = os.environ.get("H_PS_BIN") or "/bin/ps"
+            # Two calls on purpose. exe comes from comm, and the command line is
+            # read only for app-path processes. One ps line cannot split those
+            # safely when comm contains spaces (slicing it would put argv back
+            # into the snapshot). A helper that starts or exits between the two
+            # calls can be miscounted for this tick only. HELPER_MISSING_SEC and
+            # HELPER_BASELINE_SEC are both much longer than one tick, so that
+            # skew cannot by itself open helper_missing or become the learned baseline.
             rc = subprocess.run([ps_bin, "-axww", "-o", "pid=,ppid=,etime=,comm="],
                                 capture_output=True, text=True, timeout=10)
             rcmd = subprocess.run([ps_bin, "-axww", "-o", "pid=,command="],
@@ -462,12 +469,18 @@ prev_bpid = as_int(prev.get("helperBaselinePid"))
 prev_baseline = as_int(prev.get("helperBaseline"))
 prev_missing_was = as_int(prev.get("helperMissingSinceMs"))
 prev_floor_pending = prev.get("helperFloorPending") is True
+# Config expected counts even when nothing has been learned. A pid change while
+# short must carry that number, not only a learned baseline.
+carry_count = None
+if h_expected_cfg is not None and h_expected_cfg > 0:
+    carry_count = h_expected_cfg
+elif prev_baseline is not None and prev_baseline > 0:
+    carry_count = prev_baseline
 # A helper_missing relaunch, or a pid change while helpers are still short, keeps the
 # old expected count as a floor. Do not learn the short count as the new healthy baseline.
 floor_carry = (
     (not same_pid)
-    and prev_baseline is not None
-    and prev_baseline > 0
+    and carry_count is not None
     and (prev_missing_was is not None or prev_floor_pending)
 )
 if same_pid and prev_bpid == pid:
@@ -602,8 +615,10 @@ if helper_none_seen and str(reason).startswith("healthy"):
         "Not relaunching from this flag alone."
     )
 
-# Socket counts only on ticks that will snapshot (not every healthy tick). Exit 1 is a real
-# error here: leave helperSockets null rather than recording zeros.
+# Socket counts only on ticks that will snapshot (not every healthy tick).
+# macOS lsof 4.91 exits 1 with empty stdout and empty stderr when none of the
+# pids has an ESTABLISHED TCP socket. That is the zero-socket outage, not a
+# failed scan. Exit 1 with stderr, or any other non-zero exit, leaves the field null.
 want_sockets = h_sock_check and helper_pids and (need or helper_observe)
 if want_sockets:
     out_lines = None
@@ -621,8 +636,9 @@ if want_sockets:
             r = subprocess.run([lsof_bin, "-nP", "-a", "-p", ",".join(str(x) for x in helper_pids),
                                 "-iTCP", "-sTCP:ESTABLISHED", "-Fpn"],
                                capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                out_lines = r.stdout.splitlines()
+            no_match = r.returncode == 1 and not (r.stderr or "").strip()
+            if r.returncode == 0 or no_match:
+                out_lines = (r.stdout or "").splitlines()
                 lsof_ok = True
         except Exception:
             out_lines = None
