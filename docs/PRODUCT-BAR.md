@@ -3,7 +3,7 @@
 **Set:** 2026-10-02 ~11:01 PM PT; transport locks ~11:04 and ~11:07 PM PT; modes pack ~11:35 PM PT  
 **Applies to:** kit **1.5.0** (current). The worker-beacon inbox is deployed and live on the operator's personal Cloudflare; its tokens are Worker secrets plus a token file outside the repo.
 
-**Honest status against bar 1:** S-NEW-D is covered when an agent POSTs a heal-request to the beacon (now a mandatory auto-POST, [agent loop](1.5.0/AGENT-LOOP.md)). 1.5.0 adds a Mac-local **observer** for one S-NEW-D cause (helper exit, `helper_missing`), log-only by default; it is a correlation, not a cloud signal. Prove D **failed** 2026-10-07 because no agent posted ([record](1.5.0/PROVE-D-FAIL-2026-10-07.md)). Prove C (beacon path) and the live `.disable` check passed; Prove D (a real silent disconnect healed via the beacon) is open. See [CAPABILITY-CHECKS.md](CAPABILITY-CHECKS.md).
+**Honest status against bar 1:** S-NEW-D is covered when an agent POSTs a heal-request to the beacon. The runbook's immediate-relaunch rule is a proposal, not kit behavior ([agent loop](1.5.0/AGENT-LOOP.md)). 1.5.0 adds a Mac-local **observer** for one S-NEW-D cause (helper exit, `helper_missing`), log-only by default; it is a correlation, not a cloud signal. Prove D **failed** 2026-10-07 because no agent posted ([record](1.5.0/PROVE-D-FAIL-2026-10-07.md)). Prove C (beacon path) and the live `.disable` check passed; Prove D (a real silent disconnect healed via the beacon) is open. See [CAPABILITY-CHECKS.md](CAPABILITY-CHECKS.md).
 
 ## Bars
 

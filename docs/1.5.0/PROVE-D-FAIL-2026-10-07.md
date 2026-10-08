@@ -58,6 +58,6 @@ Signal 2 is what kit 1.5.0 counts (`helper_missing`). Signal 3 is recorded obser
 
 ## What changed because of this
 
-Kit 1.5.0: helper-count observer (`helper_missing`, log-only default), observe-only helper socket counts, `helperPids`/`helperCount` in last.json, diagnostics snapshot on non-ok ticks (and a `before_relaunch` snapshot before quit/`open`), and the agent-loop auto-POST rule ([AGENT-LOOP.md](AGENT-LOOP.md)).
+Kit 1.5.0: helper-count observer (`helper_missing`, log-only default), observe-only helper socket counts, `helperPids`/`helperCount` in last.json, diagnostics snapshot on non-ok ticks (and a `before_relaunch` snapshot before quit/`open`), and an agent-runbook proposal ([AGENT-LOOP.md](AGENT-LOOP.md); rule B, immediate relaunch, is not approved and is not kit behavior).
 
 The helper count is a proxy for this outage, not a `ListMachines` signal (`cloudConnectObservable` stays `false`). The product ask — a non-secret `local-exec-status.json`, plus recording clean utility-helper exits in `childDeaths` and respawning that helper promptly — is written up in [PRODUCT-STATUS-FILE.md](PRODUCT-STATUS-FILE.md). 1.5.0 does not implement that file.

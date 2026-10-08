@@ -1,6 +1,6 @@
 # Self-heal modes — deploy-time pack (proposed)
 
-> **1.5.0 update (2026-10-07).** mac-local now also *observes* the S-NEW-D **helper-exit signature**: the main Grok Bot process and its heartbeat stay healthy, but one of its `Grok Bot Helper` utility processes of sub-type `node.mojom.NodeService` is gone (baseline 2 → 1). Reason `helper_missing`; **log-only by default** (`HEAL_ON_HELPER_MISSING=0` → `status=observe` + snapshot; `=1` → relaunch with cooldown and one relaunch per window). Real-incident record: [Prove D FAIL 2026-10-07](../1.5.0/PROVE-D-FAIL-2026-10-07.md) — the beacon was armed but no agent posted, so the agent loop now auto-POSTs ([AGENT-LOOP](../1.5.0/AGENT-LOOP.md)). The text below is the 1.4.0 snapshot; the matrix row for mac-local is amended in place.
+> **1.5.0 update (2026-10-07).** mac-local now also *observes* the S-NEW-D **helper-exit signature**: the main Grok Bot process and its heartbeat stay healthy, but one of its `Grok Bot Helper` utility processes of sub-type `node.mojom.NodeService` is gone (baseline 2 → 1). Reason `helper_missing`; **log-only by default** (`HEAL_ON_HELPER_MISSING=0` → `status=observe`, `readiness=helper_missing_observe`, snapshot; `=1` → one relaunch, then `helper_suppressed` until the count meets the floor). Real-incident record: [Prove D FAIL 2026-10-07](../1.5.0/PROVE-D-FAIL-2026-10-07.md). The agent runbook is [AGENT-LOOP](../1.5.0/AGENT-LOOP.md); its immediate-relaunch rule is a proposal, not kit behavior. The text below is the 1.4.0 snapshot; the matrix row for mac-local is amended in place.
 
 **Status:** product docs only. Nothing here is implemented beyond **mode mac-local** (shipped as kit **1.3.0**).  
 **Bar:** operator, 2026-10-02 ~11:35 PM PT  
@@ -37,7 +37,7 @@ Latch presents these trade-offs at deploy time. The user picks **one or more mod
 - Payload is heal-request only (`{v, action: "heal_request", machineId, jti, exp}`). No shell, path, or log upload.
 - Built (when built) on **personal** Cloudflare via Wrangler — not this repository, and not an employer Cloudflare account.
 - Low token cost relative to vitals-buddy: bots act only when they already know the Mac is unreachable from the fleet side.
-- **1.5.0 lesson (Prove D FAIL):** "if the beacon is live, POST" was not enough; the coordinating agent soft-parked and escalated to the operator instead. The loop is now mandatory: auto-POST after ≥ 3 min `connected=false`, or immediately when a user message arrives from a machine shown `connected=false` ([AGENT-LOOP](../1.5.0/AGENT-LOOP.md)). The agent host can itself be down (it was for ~35 min), which is why the Mac-local helper observer exists.
+- **1.5.0 lesson (Prove D FAIL):** "if the beacon is live, POST" was not enough; the coordinating agent soft-parked and escalated to the operator instead. The runbook's rule A is a beacon POST after ≥ 3 min `connected=false`. Immediate relaunch when a user message arrives from a machine shown `connected=false` is a **proposal pending the owner** ([AGENT-LOOP](../1.5.0/AGENT-LOOP.md)), not kit behavior, and it conflicts with not relaunching a session that is in use. The agent host can itself be down (it was for ~35 min), which is why the Mac-local helper observer exists.
 
 ### vitals-buddy (proposed)
 

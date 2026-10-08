@@ -1,6 +1,6 @@
 # 1.4.0 (released 2026-10-05)
 
-**Kit version:** **1.4.0** (`VERSION`). The Worker is deployed and live on the operator's personal Cloudflare (https://latch-worker-beacon.kadosh.workers.dev); tokens are Worker secrets plus a token file outside the repo, never in git. Prove C passed: [PROVE-C-2026-10-05.md](PROVE-C-2026-10-05.md). Prove D is still open.
+**Kit version:** **1.4.0** (`VERSION`). The Worker is deployed and live on the operator's personal Cloudflare (https://<operator-worker-host>); tokens are Worker secrets plus a token file outside the repo, never in git. Prove C passed: [PROVE-C-2026-10-05.md](PROVE-C-2026-10-05.md). Prove D is still open.
 
 **Honest status:** S-NEW-D is **not** detected or auto-healed by the LaunchAgent; a heal-only beacon request can relaunch it. A live Grok Bot process plus a moving dune heartbeat under 180s still logs `status=ok` / `readiness=local_healthy`. `cloudConnectObservable` stays `false`.
 

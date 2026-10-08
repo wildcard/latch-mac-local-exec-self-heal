@@ -13,8 +13,8 @@ What it adds is a **Mac-local proxy for one observed cause**, the 2026-10-07 hel
 
 - Count `Grok Bot Helper` children of the main pid whose argv contains `--utility-sub-type=node.mojom.NodeService`. Healthy baseline on that outage was 2.
 - Below the learned or configured expected count for ≥ `HELPER_MISSING_SEC` (300s) → reason `helper_missing`.
-- **Log-only by default** (`HEAL_ON_HELPER_MISSING=0`): `status=observe`, diagnostics snapshot, no relaunch. The beacon poll still runs.
-- `HEAL_ON_HELPER_MISSING=1` relaunches through the existing quit + `open -ga` path and readiness gate. It respects the single-flight lock and `COOLDOWN_SEC`, and it allows one helper relaunch per `HELPER_RELAUNCH_WINDOW_SEC` (3600) before `helper_suppressed`.
+- **Log-only by default** (`HEAL_ON_HELPER_MISSING=0`): `status=observe`, `readiness=helper_missing_observe`, diagnostics snapshot, no relaunch. The beacon poll still runs.
+- `HEAL_ON_HELPER_MISSING=1` sends that same signal through quit + `open -ga` and the readiness gate, under the single-flight lock and `COOLDOWN_SEC`. After that relaunch the old expected count is a floor. While the live count is still short the status stays `helper_suppressed` (no further relaunch, lower count not stored), including after `HELPER_RELAUNCH_WINDOW_SEC`. A new drop can relaunch only once the count has met the floor and the window has elapsed.
 
 That proxy does **not** cover every silent disconnect. The 2026-10-02 incident kept a moving heartbeat with no recorded helper exit. A full helper count is not evidence the cloud link is up. Socket counts (`helperSockets`) are diagnostics only and never trigger a relaunch.
 
@@ -60,3 +60,7 @@ Not in 1.5.0. Proposed, unchanged from the 2026-10-02 research note:
 - Never open `local-exec-daemon-connection.json` or `local-exec-daemon-credential.json`.
 
 Until that file exists, saying the LaunchAgent classifies every fleet disconnect locally would be a false green.
+
+## When to retire `helper_missing`
+
+`helper_missing` becomes snapshot-only, or is removed, once a product `local-exec-status.json` is proven on a real `connected=false` window, or once the app records helper exits and respawns the helper itself. Until one of those is true, the helper count stays a log-only proxy for the 2026-10-07 exit and is not a cloud-connect signal.
