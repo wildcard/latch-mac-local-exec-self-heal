@@ -97,7 +97,7 @@ cat ~/Library/Logs/GrokBotLocalExecHeal-last.json
 
 | Env | Default | Meaning |
 |---|---|---|
-| `HEAL_ON_HELPER_MISSING` | `0` | `0` log-only; `1` relaunch on `helper_missing` |
+| `HEAL_ON_HELPER_MISSING` | `0` | `0` log-only (`status=observe`). `1` relaunches on `helper_missing` through quit + `open -ga`, under the single-flight lock and `COOLDOWN_SEC`, at most once per `HELPER_RELAUNCH_WINDOW_SEC` (then `helper_suppressed`). It does not see `ListMachines.connected`. |
 | `HELPER_MISSING_SEC` | `300` | How long the count must stay below expected |
 | `HELPER_EXPECTED` | *(empty)* | Explicit expected count; empty = learned baseline |
 | `HELPER_BASELINE_SEC` | `600` | Stable-and-healthy time before a count becomes the baseline |
@@ -106,7 +106,9 @@ cat ~/Library/Logs/GrokBotLocalExecHeal-last.json
 | `HELPER_CHECK` | `1` | `0` disables the scan |
 | `HEAL_SNAPSHOT_MIN_SEC` / `HEAL_SNAPSHOT_KEEP` / `HEAL_SNAPSHOT_DIR` | `900` / `20` / logs dir | Snapshot rate limit, retention, location |
 
-macOS diagnostics: the unified log can label Grok Bot under another Electron app's name — filter `log show` by `processID`; in zsh call `/usr/bin/log` (`log` is a builtin).
+`HEAL_ON_HELPER_MISSING=1` still misses a silent disconnect that does not drop a NodeService helper, and a learned baseline only rises (a third helper held for `HELPER_BASELINE_SEC` can make a later healthy count of 2 look missing — set `HELPER_EXPECTED`, or leave heal off). `cloudConnectObservable` stays `false`. The app-side fix is a non-secret status file: [`docs/1.5.0/PRODUCT-STATUS-FILE.md`](docs/1.5.0/PRODUCT-STATUS-FILE.md).
+
+macOS diagnostics: the unified log can label Grok Bot under another Electron app's name — filter `log show` by `processID`; in zsh call `/usr/bin/log` (`log` is a builtin). Snapshots taken before a relaunch are `GrokBotLocalExecHeal-snap-*-before.json`. They store helper pids, type flags, and allowlisted heartbeat/status fields. They do not store argv, tokens, or app-log tails.
 
 ## Tests
 

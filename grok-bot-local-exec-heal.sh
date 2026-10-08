@@ -144,14 +144,16 @@ except Exception:
 
 pid = None
 reason_bits = []
+ds = None
 ds_path = os.path.join(sup, "desktop-status.json")
 if os.path.isfile(ds_path):
     try:
         ds = json.load(open(ds_path))
-        raw = ds.get("pid")
+        raw = ds.get("pid") if isinstance(ds, dict) else None
         if raw is not None and str(raw).strip() != "":
             pid = int(raw)
     except Exception:
+        ds = None
         reason_bits.append("desktop_status_unreadable")
 
 alive = False
@@ -202,6 +204,69 @@ if newest:
         reason_bits.append("pid_mismatch_session_vs_desktop_status")
     if newest[1].get("quitRequestedAtMs"):
         reason_bits.append("quit_requested")
+
+# Allowlisted copies for diagnostics. Unknown keys (installId, tokens, paths) are dropped.
+def pub_num(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return v
+
+def pub_token(v, limit=64):
+    # Short identifiers only: version strings, bootOutcome. No paths, hosts, or addresses.
+    if not isinstance(v, str) or not v or len(v) > limit:
+        return None
+    if any(c in v for c in "/\\@\n\r\t "):
+        return None
+    return v
+
+def pub_child_deaths(v):
+    # Counts only. A string, path, or unsafe key redacts the whole map (count kept).
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        return {"redacted": True}
+    out = {}
+    for k, val in v.items():
+        key = pub_token(k, 64)
+        if key is None:
+            return {"count": len(v), "redacted": True}
+        if isinstance(val, bool) or val is None:
+            out[key] = val
+        elif isinstance(val, (int, float)):
+            out[key] = val
+        else:
+            return {"count": len(v), "redacted": True}
+    return out
+
+desktop_pub = None
+if isinstance(ds, dict):
+    desktop_pub = {}
+    if pub_num(ds.get("version")) is not None:
+        desktop_pub["version"] = pub_num(ds.get("version"))
+    if pub_num(ds.get("pid")) is not None:
+        desktop_pub["pid"] = int(ds.get("pid"))
+    av = pub_token(ds.get("appVersion"), 32)
+    if av:
+        desktop_pub["appVersion"] = av
+    if pub_num(ds.get("startedAtMs")) is not None:
+        desktop_pub["startedAtMs"] = int(ds.get("startedAtMs"))
+    if isinstance(ds.get("signedIn"), bool):
+        desktop_pub["signedIn"] = ds.get("signedIn")
+
+dune_pub = None
+if newest:
+    j = newest[1]
+    dune_pub = {}
+    if pub_num(j.get("pid")) is not None:
+        dune_pub["pid"] = int(j.get("pid"))
+    dune_pub["heartbeatAtMs"] = hb_ms
+    bo = pub_token(boot, 32) if boot else None
+    if bo:
+        dune_pub["bootOutcome"] = bo
+    if isinstance(j.get("mainFaultSeen"), bool):
+        dune_pub["mainFaultSeen"] = j.get("mainFaultSeen")
+    if "childDeaths" in j:
+        dune_pub["childDeaths"] = pub_child_deaths(j.get("childDeaths"))
 
 def as_int(v):
     try:
@@ -495,6 +560,8 @@ if scan_out:
         "helperMissingSinceMs": missing_since,
         "helperMissingForSec": missing_for,
         "helperSockets": helper_sockets,
+        "desktopStatus": desktop_pub,
+        "dune": dune_pub,
         "tree": tree,
     }
     try:
@@ -802,6 +869,10 @@ if status not in ("ok", "disabled"):
             "helperExpected", "helperExpectedSource", "helperMissingForSec", "helperSockets",
             "lastHealAtMs", "lastBeaconHealAtMs", "lastHelperHealAtMs")}
         snap["processTree"] = tree
+        snap["processTreeAt"] = "tick_start"
+        snap["phase"] = "tick"
+        snap["desktopStatus"] = scan.get("desktopStatus")
+        snap["dune"] = scan.get("dune")
         try:
             os.makedirs(snap_dir, exist_ok=True)
             with open(os.path.join(snap_dir, name), "w") as f:
@@ -824,6 +895,101 @@ with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PY
+}
+
+# Write the diagnostics snapshot BEFORE quit/open. The scan file already holds the
+# pre-relaunch process tree and allowlisted status fields. Outcome snapshots still
+# go through write_state after the readiness gate; this file is the detection record.
+snapshot_before_relaunch() {
+  local name
+  name="$(W_SCAN="${SCAN_FILE:-}" \
+    W_SNAP_DIR="${HEAL_SNAPSHOT_DIR:-$(dirname "$STATE")}" \
+    W_REASON="${ORIG_REASON:-}" W_PID="${PID:-}" W_AGE="${HEARTBEAT_AGE:-}" \
+    W_BOOT="${BOOT:-}" W_READINESS="${READINESS:-}" W_HINT="${ESCALATE_HINT:-}" \
+    W_KIT="$KIT_VERSION" W_KEEP="${HEAL_SNAPSHOT_KEEP:-20}" \
+    "$PYTHON" - <<'PY'
+import glob, json, os, sys, time
+
+scan_path = os.environ.get("W_SCAN", "")
+scan = {}
+if scan_path:
+    try:
+        with open(scan_path) as f:
+            scan = json.load(f) or {}
+    except Exception:
+        scan = {}
+if not isinstance(scan, dict):
+    scan = {}
+tree = scan.get("tree") or []
+if os.environ.get("HEAL_NOW_MS"):
+    now_ms = int(os.environ["HEAL_NOW_MS"])
+else:
+    now_ms = int(time.time() * 1000)
+iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now_ms / 1000.0))
+snap_dir = os.environ.get("W_SNAP_DIR") or "."
+try:
+    keep = max(1, int(os.environ.get("W_KEEP") or 20))
+except Exception:
+    keep = 20
+
+def pfloat(s):
+    try:
+        if s is None or str(s).strip() == "":
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+def pint(s):
+    try:
+        if s is None or str(s).strip() == "":
+            return None
+        return int(str(s).strip())
+    except Exception:
+        return None
+
+stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime(now_ms / 1000.0)) + "-%03d" % (now_ms % 1000)
+name = "GrokBotLocalExecHeal-snap-%s-before.json" % stamp
+snap = {
+    "phase": "before_relaunch",
+    "processTreeAt": "tick_start",
+    "kitVersion": os.environ.get("W_KIT", ""),
+    "checkedAtMs": now_ms,
+    "checkedAtIso": iso,
+    "status": "pre_relaunch",
+    "reason": os.environ.get("W_REASON", ""),
+    "action": "relaunch",
+    "pid": pint(os.environ.get("W_PID", "")),
+    "heartbeatAgeSec": pfloat(os.environ.get("W_AGE", "")),
+    "bootOutcome": os.environ.get("W_BOOT") or None,
+    "readiness": os.environ.get("W_READINESS") or None,
+    "escalateHint": os.environ.get("W_HINT") or None,
+    "helperCount": scan.get("helperCount"),
+    "helperPids": scan.get("helperPids"),
+    "helperExpected": scan.get("helperExpected"),
+    "helperExpectedSource": scan.get("helperExpectedSource"),
+    "helperMissingForSec": scan.get("helperMissingForSec"),
+    "helperSockets": scan.get("helperSockets"),
+    "desktopStatus": scan.get("desktopStatus"),
+    "dune": scan.get("dune"),
+    "processTree": tree,
+}
+os.makedirs(snap_dir, exist_ok=True)
+with open(os.path.join(snap_dir, name), "w") as f:
+    json.dump(snap, f, indent=2)
+    f.write("\n")
+snaps = sorted(glob.glob(os.path.join(snap_dir, "GrokBotLocalExecHeal-snap-*.json")))
+for old in snaps[:-keep]:
+    try:
+        os.remove(old)
+    except Exception:
+        pass
+print(name)
+PY
+)" || true
+  if [[ -n "${name:-}" ]]; then
+    log "snapshot before relaunch: $name"
+  fi
 }
 
 # single-flight
@@ -962,6 +1128,7 @@ fi
 
 ORIG_REASON="$REASON"
 log "heal start reason=$ORIG_REASON pid=${PID:-none} heartbeat_age=${HEARTBEAT_AGE:-n/a} helpers=${HELPER_COUNT:-n/a}/${HELPER_EXPECTED_EFF:-n/a}"
+snapshot_before_relaunch
 
 if [[ -f "$REQUEST" ]]; then
   rm -f "$REQUEST"

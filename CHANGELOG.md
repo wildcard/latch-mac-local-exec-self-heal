@@ -12,7 +12,10 @@ S-NEW-D helper-exit signature, from the real 2026-10-07 outage (Prove D **FAIL**
 - **Plist template:** `HEAL_ON_HELPER_MISSING=0`, `HELPER_MISSING_SEC=300` (operator values preserved on reinstall as before).
 - **Agent loop:** agents auto-POST a beacon heal-request after ≥ 3 min `connected=false`, or immediately when a user message arrives from a machine shown `connected=false` ([`docs/1.5.0/AGENT-LOOP.md`](docs/1.5.0/AGENT-LOOP.md)).
 - **macOS gotchas documented:** the unified log can label Grok Bot under another Electron app's name (filter by `processID`); in zsh use `/usr/bin/log`.
-- Tests: 20 new hermetic cases with canned `ps`/`lsof` fixtures (`tests/fixtures/helpers/`); suite 64/64 on Linux. No test reads the host process table or quits an app.
+- **What this is not:** `cloudConnectObservable` stays `false`. The helper count is a proxy for the 2026-10-07 exit, not `ListMachines.connected`. Product follow-up (non-secret `local-exec-status.json`, plus recording clean helper exits in `childDeaths`): [`docs/1.5.0/PRODUCT-STATUS-FILE.md`](docs/1.5.0/PRODUCT-STATUS-FILE.md).
+- **Diagnostics before relaunch.** A `GrokBotLocalExecHeal-snap-*-before.json` (`phase=before_relaunch`) is written before quit/`open`, with the tick-start process tree plus allowlisted `desktop-status` / dune fields (no argv, no installId, no tokens, no app-log tail).
+- **`HEAL_ON_HELPER_MISSING=1`:** same signal relaunches, still under the single-flight lock, `COOLDOWN_SEC`, and one relaunch per hour (`helper_suppressed` after that). Default remains `0`. The learned baseline only rises, so a long-lived extra helper can later look like a drop; set `HELPER_EXPECTED` if that happens. A silent disconnect that does not drop a helper is still invisible.
+- Tests: hermetic cases with canned `ps`/`lsof` fixtures, an Oct 7 replay (fresh moving heartbeat, helper count 2→1, grace, log-only snapshot, then opt-in relaunch to readiness), and `install.sh` preservation of `HEAL_ON_HELPER_MISSING` / `HELPER_MISSING_SEC` / `HELPER_EXPECTED`. No test reads the host process table or quits an app.
 
 ## 1.4.2 — 2026-10-05
 

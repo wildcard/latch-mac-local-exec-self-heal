@@ -724,6 +724,9 @@ assert s["status"] == "observe" and s["reason"] == "helper_missing", s
 assert s["helperCount"] == 1 and s["helperExpected"] == 2, s
 pids = sorted(p["pid"] for p in s["processTree"])
 assert pids == [4242, 4290, 4291, 4300, 4302, 4400], pids
+assert s.get("phase") == "tick", s.get("phase")
+assert s.get("desktopStatus", {}).get("pid") == 4242, s.get("desktopStatus")
+assert s.get("dune", {}).get("bootOutcome") == "ready", s.get("dune")
 PY
 }
 
@@ -747,7 +750,25 @@ t_helper_missing_relaunch() {
   [[ "$(jget helperCount)" == "1" ]] || die "pre-heal helperCount=$(jget helperCount)"
   grep -q "heal start reason=helper_missing" "$HEAL_LOG" || die "missing heal start"
   grep -q "dry-run: skip quit/open" "$HEAL_LOG" || die "dry-run did not skip quit/open"
-  [[ "$(snap_count)" == "1" ]] || die "snapshots=$(snap_count)"
+  grep -q "snapshot before relaunch" "$HEAL_LOG" || die "no pre-relaunch snapshot"
+  python3 - "$HEAL_LOG" <<'PY' || die "snapshot not written before quit/open"
+import sys
+text = open(sys.argv[1]).read()
+a = text.find("snapshot before relaunch")
+b = text.find("dry-run: skip quit/open")
+assert a != -1 and b != -1 and a < b, (a, b)
+PY
+  # Detection record (*-before.json) plus the post-readiness tick snapshot.
+  [[ "$(snap_count)" == "2" ]] || die "snapshots=$(snap_count)"
+  local before
+  before="$(ls "$(dirname "$HEAL_STATE")"/GrokBotLocalExecHeal-snap-*-before.json | tail -1)"
+  python3 - "$before" <<'PY' || die "before snapshot content"
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s["phase"] == "before_relaunch" and s["reason"] == "helper_missing", s
+assert s["helperCount"] == 1 and s["status"] == "pre_relaunch", s
+assert s["processTreeAt"] == "tick_start"
+PY
 }
 
 t_helper_missing_cooldown() {
@@ -917,6 +938,120 @@ t_snapshot_rate_limited_and_pruned() {
   [[ "$(snap_count)" == "2" ]] || die "not pruned to HEAL_SNAPSHOT_KEEP: $(snap_count)"
 }
 
+# Oct 7 shape: main pid and a moving fresh heartbeat stay healthy while one
+# NodeService helper is gone (2 → 1). Under the grace window that is still ok.
+# Past HELPER_MISSING_SEC the default is log-only plus a snapshot. With
+# HEAL_ON_HELPER_MISSING=1 the same shape relaunches and reaches readiness,
+# and the diagnostics file is written before quit/open. Secrets in the status
+# files must not appear in the snapshot, last.json, or the heal log.
+t_oct7_helper_drop_replay() {
+  local now t2 t3 before
+  now="$(now_ms)"
+  export HEAL_NOW_MS="$now"
+  export HELPER_PS_FILE="$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/oct7" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"heartbeatAtMs\":$((now - 40000)),\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 700000)),\"okStreakSinceMs\":$((now - 10000))}"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "baseline tick status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget reason)" == "healthy" ]] || die "baseline reason=$(jget reason)"
+  [[ "$(jget helperCount)" == "2" ]] || die "baseline count=$(jget helperCount)"
+  [[ "$(jget cloudConnectObservable)" == "False" ]] || die "cloud flag on healthy tick"
+  [[ "$(snap_count)" == "0" ]] || die "snapshot while both helpers are up"
+
+  t2=$((now + 60000))
+  export HEAL_NOW_MS="$t2"
+  export HELPER_PS_FILE="$FIX/helpers/one-helper.ps"
+  materialize "$FIX/oct7" "$GROK_SUPPORT_DIR" "$t2"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "under-grace status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget reason)" == "healthy" ]] || die "under-grace reason=$(jget reason)"
+  [[ "$(jget helperCount)" == "1" ]] || die "dropped count=$(jget helperCount)"
+  [[ "$(jget helperMissingSinceMs)" == "$t2" ]] || die "missing clock=$(jget helperMissingSinceMs)"
+  [[ "$(jget action)" == "none" ]] || die "under-grace action=$(jget action)"
+  [[ "$(snap_count)" == "0" ]] || die "snapshot inside HELPER_MISSING_SEC"
+  grep -q "heal start" "$HEAL_LOG" && die "relaunched inside grace" || true
+
+  t3=$((t2 + 360000))
+  export HEAL_NOW_MS="$t3"
+  materialize "$FIX/oct7" "$GROK_SUPPORT_DIR" "$t3"
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "observe status=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "observe reason=$(jget reason)"
+  [[ "$(jget action)" == "none" ]] || die "log-only action=$(jget action)"
+  [[ "$(jget readiness)" == "helper_missing_observe" ]] || die "readiness=$(jget readiness)"
+  [[ "$(jget cloudConnectObservable)" == "False" ]] || die "cloudConnectObservable flipped"
+  [[ "$(snap_count)" == "1" ]] || die "observe snapshots=$(snap_count)"
+  python3 - "$(newest_snap)" "$HEAL_STATE" "$HEAL_LOG" <<'PY' || die "oct7 observe snapshot"
+import json, sys
+snap_path, state_path, log_path = sys.argv[1:]
+s = json.load(open(snap_path))
+blob = json.dumps(s) + open(state_path).read() + open(log_path).read()
+for needle in ("should-not-appear", "fixture-user", "fixture-secret", "fixture-handle", "gatewayToken", "installId"):
+    assert needle not in blob, needle
+assert s["phase"] == "tick" and s["reason"] == "helper_missing", s
+assert s["helperCount"] == 1 and s["helperExpected"] == 2, s
+ds, dune = s["desktopStatus"], s["dune"]
+assert ds["signedIn"] is True and ds["appVersion"] == "0.68.1" and ds["pid"] == 4242, ds
+assert "installId" not in ds and "token" not in ds, ds
+assert dune["bootOutcome"] == "ready" and dune["mainFaultSeen"] is False, dune
+assert dune["childDeaths"] == {}, dune
+assert "installId" not in dune and "gatewayToken" not in dune, dune
+subs = [p.get("subType") for p in s["processTree"]]
+assert subs.count("node.mojom.NodeService") == 1, subs
+PY
+
+  export HEAL_ON_HELPER_MISSING=1
+  export HEAL_NOW_MS="$t3"
+  materialize "$FIX/oct7" "$GROK_SUPPORT_DIR" "$t3"
+  materialize "$FIX/post-ready" "$TMP/post" "$t3"
+  export HEAL_SWAP_SUPPORT_ON_RELAUNCH="$TMP/post"
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "heal status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "heal reason=$(jget reason)"
+  [[ "$(jget readiness)" == "ready" ]] || die "readiness=$(jget readiness)"
+  [[ "$(jget action)" == "relaunch" ]] || die "action=$(jget action)"
+  [[ "$(jget cloudConnectObservable)" == "False" ]] || die "cloud flag after heal"
+  python3 - "$HEAL_LOG" <<'PY' || die "oct7 snapshot not before relaunch"
+import sys
+text = open(sys.argv[1]).read()
+a = text.find("snapshot before relaunch")
+b = text.find("dry-run: skip quit/open")
+assert a != -1 and b != -1 and a < b, (a, b)
+PY
+  before="$(ls "$(dirname "$HEAL_STATE")"/GrokBotLocalExecHeal-snap-*-before.json | tail -1)"
+  python3 - "$before" <<'PY' || die "oct7 before snapshot"
+import json, sys
+s = json.load(open(sys.argv[1]))
+blob = json.dumps(s)
+assert "should-not-appear" not in blob and "installId" not in blob
+assert s["phase"] == "before_relaunch" and s["helperCount"] == 1, s
+assert s["dune"]["childDeaths"] == {} and s["desktopStatus"]["signedIn"] is True, s
+PY
+}
+
+t_install_preserves_helper_env() {
+  local home="$TMP/home-helper"
+  local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
+  mkdir -p "$home/Library/LaunchAgents"
+  python3 - "$pl" <<'PY'
+import plistlib, sys
+plistlib.dump({"Label": "x", "EnvironmentVariables": {
+    "HEAL_ON_HELPER_MISSING": "1",
+    "HELPER_MISSING_SEC": "120",
+    "HELPER_BASELINE_SEC": "900",
+    "HELPER_EXPECTED": "2",
+    "BEACON_URL": "https://example.invalid",
+    "PATH": "/opt/custom/bin:/usr/bin:/bin"}},
+    open(sys.argv[1], "wb"))
+PY
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "install failed"
+  # Operator overrides of the new helper keys win over the template (0 / 300).
+  # Keys the template does not list (HELPER_BASELINE_SEC, HELPER_EXPECTED) are kept.
+  # Beacon env is still preserved. Kit-owned PATH comes from the template.
+  t_install_env_check "$pl" "HEAL_ON_HELPER_MISSING=1;HELPER_MISSING_SEC=120;HELPER_BASELINE_SEC=900;HELPER_EXPECTED=2;BEACON_URL=https://example.invalid;HEAL_ON_STUCK_SESSION=1;PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    || die "helper env not preserved"
+}
+
 t_install_template_helper_defaults() {
   local home="$TMP/home3"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
   mkdir -p "$home"
@@ -1082,6 +1217,8 @@ run_case T-helper-ps-unreadable-no-signal t_helper_ps_unreadable_no_signal
 run_case T-helper-sockets-counts-no-addresses t_helper_sockets_counts_no_addresses
 run_case T-snapshot-rate-limited-and-pruned t_snapshot_rate_limited_and_pruned
 run_case T-install-template-helper-defaults t_install_template_helper_defaults
+run_case T-install-preserves-helper-env t_install_preserves_helper_env
+run_case T-oct7-helper-drop-replay t_oct7_helper_drop_replay
 echo
 echo "passed=$PASS failed=$FAIL"
 if (( FAIL > 0 )); then

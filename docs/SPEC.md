@@ -60,11 +60,26 @@ Each tick (main pid alive, `HELPER_CHECK=1`):
 - **Unknown count** (ps failed / unreadable) is never treated as missing.
 - **Sockets (observe-only):** with `HELPER_SOCKET_CHECK=1` (default), `lsof -nP -a -p <helper pids> -iTCP -sTCP:ESTABLISHED -Fpn`; per helper, the count of established connections whose remote port is `HELPER_SOCKET_PORT` (443) → `helperSockets` `{pid: n}`. Counts only: no addresses, hostnames or argv are stored. Never triggers a relaunch.
 
-Ship mode: **log-only** (`HEAL_ON_HELPER_MISSING=0`) for at least a week of real ticks to confirm the baseline is stable across app versions and idle states, then opt in with `HEAL_ON_HELPER_MISSING=1`.
+Ship mode: **log-only** (`HEAL_ON_HELPER_MISSING=0`). `HEAL_ON_HELPER_MISSING=1` turns the same signal into a relaunch. Do that only after real ticks show the learned baseline is stable. What `=1` does, and what it refuses to do, is in the false-positive section below. This is not a substitute for a product status file: [1.5.0/PRODUCT-STATUS-FILE.md](1.5.0/PRODUCT-STATUS-FILE.md).
+
+### `HEAL_ON_HELPER_MISSING=1` and false positives
+
+`=1` uses the existing quit + `open -ga "Grok Bot"` path and the readiness gate. Guards:
+
+- Count must stay below expected for ≥ `HELPER_MISSING_SEC` (300s). A helper that exits and returns inside that window does not relaunch. The 2026-10-07 gap was ~50 minutes; a staff-described ~1 minute reconnect backoff does not trip this.
+- `ps` unreadable or `HELPER_CHECK=0` is not “missing.”
+- Expected count is learned only while the main pid is locally healthy (fresh heartbeat, boot ready or absent, not frozen) and the count is stable for ≥ `HELPER_BASELINE_SEC` (600s). It never lowers for that pid, and a baseline of 0 never fires. It resets when the main pid changes or after any relaunch.
+- Single-flight lock. `COOLDOWN_SEC` (300) applies (`helper_missing` does not bypass cooldown). One helper relaunch per `HELPER_RELAUNCH_WINDOW_SEC` (3600), then `helper_suppressed` and an escalate hint.
+- `.disable` wins. `operator_request` and `beacon_request` keep their existing precedence.
+- Only direct children of the main pid, name prefix `Grok Bot Helper`, subtype `node.mojom.NodeService`. GPU, renderer, `NetworkService`, and another app’s helpers are not counted.
+
+Residual false-positive risk if `=1` is on: the learned baseline only rises. A third NodeService helper that stays up for 600s locks the expected count at 3, and a later healthy count of 2 looks missing. Set `HELPER_EXPECTED` or turn heal back off. The signal is also a false negative for silent disconnects that do not drop a helper (the 2026-10-02 window). `cloudConnectObservable` stays `false` either way.
 
 ## Diagnostics snapshot (1.5.0)
 
-On every tick whose status is not `ok` or `disabled`, write `GrokBotLocalExecHeal-snap-<YYYYmmddTHHMMSS>-<ms>.json` next to `last.json` (or in `HEAL_SNAPSHOT_DIR`), rate-limited to one per status+reason per `HEAL_SNAPSHOT_MIN_SEC` (900), pruned to the newest `HEAL_SNAPSHOT_KEEP` (20). Contents: the `last.json` decision fields, helper fields, and `processTree` = main pid + direct children as `{pid, ppid, etime, exe, type, subType}`. `exe` is the executable name only; `type`/`subType` only for app-bundle processes and only `[A-Za-z0-9._-]`. **No argv** is stored (Grok Bot children include local-exec shells, and helper argv carries the user-data-dir path).
+On every tick whose status is not `ok` or `disabled`, write `GrokBotLocalExecHeal-snap-<YYYYmmddTHHMMSS>-<ms>.json` next to `last.json` (or in `HEAL_SNAPSHOT_DIR`), rate-limited to one per status+reason per `HEAL_SNAPSHOT_MIN_SEC` (900), pruned to the newest `HEAL_SNAPSHOT_KEEP` (20). When a tick is about to relaunch, a second file `...-before.json` (`phase=before_relaunch`) is written **before** quit/`open`, from the process tree captured at tick start.
+
+Contents: decision fields, helper fields, `processTree` = main pid + direct children as `{pid, ppid, etime, exe, type, subType}`, plus allowlisted `desktopStatus` (`version`, `pid`, `appVersion`, `startedAtMs`, `signedIn`) and `dune` (`pid`, `heartbeatAtMs`, `bootOutcome`, `mainFaultSeen`, numeric `childDeaths`). `exe` is the executable name only; `type`/`subType` only for app-bundle processes and only `[A-Za-z0-9._-]`. **No argv**, no user-data-dir path, no installId, no token. App logs are not tailed (no documented secret-free predicate). Socket diagnostics are counts on `HELPER_SOCKET_PORT` only. `last.json` records `lastSnapshot` (file name) plus the helper summary fields.
 
 A heartbeat whose timestamp **keeps moving**, with age still under 180s, is **not** `heartbeat_frozen`. That pattern is S-NEW-D when the cloud link is nevertheless down. See the incident note.
 
