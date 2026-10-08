@@ -69,8 +69,11 @@ HELPER_MISSING_SEC="${HELPER_MISSING_SEC:-300}"
 # Explicit expected helper count. Empty = use the baseline learned from the healthy state.
 HELPER_EXPECTED="${HELPER_EXPECTED:-}"
 # A count is learned once, as the minimum positive count seen over this window after the
-# pid appears. An already-learned baseline is never raised or lowered. HELPER_EXPECTED wins
-# when set. Values under 60s would store a blip; non-numeric falls back to 600.
+# pid appears. The window needs at least 3 healthy samples, not only elapsed time.
+# A lower count updates that minimum only after 2 consecutive healthy ticks.
+# An unhealthy tick does not seed it. An already-learned baseline is never raised or
+# lowered. HELPER_EXPECTED wins when set. Values under 60s would store a blip;
+# non-numeric falls back to 600.
 HELPER_BASELINE_SEC="${HELPER_BASELINE_SEC:-600}"
 HELPER_RELAUNCH_WINDOW_SEC="${HELPER_RELAUNCH_WINDOW_SEC:-3600}"
 HELPER_NAME="${HELPER_NAME:-Grok Bot Helper}"
@@ -543,28 +546,33 @@ if same_pid and prev_bpid == pid:
     baseline = prev_baseline
     stable_count = as_int(prev.get("helperStableCount"))
     stable_since = as_int(prev.get("helperStableSinceMs"))
+    healthy_samples = as_int(prev.get("helperHealthySamples")) or 0
 elif floor_carry:
     baseline = prev_baseline
     stable_count = None
     stable_since = None
+    healthy_samples = 0
 else:
     baseline = None
     stable_count = None
     stable_since = None
+    healthy_samples = 0
 locally_healthy = bool(
     alive and heartbeat_age is not None and heartbeat_age <= stale_sec
     and (not boot or boot == "ready") and not frozen_hit
 )
 # Running minimum of positive counts on this pid. helperStableCount is that
-# minimum. helperStableSinceMs is the window start. No other baseline state.
-# The window starts at the first locally healthy sample and is not reset when
-# the count changes. A higher count does not move the minimum. A count of 0
-# is not a candidate and is never learned. Learn once, after
-# HELPER_BASELINE_SEC, as that minimum. An already-learned baseline is never
-# raised or lowered. Do not learn while the process is not locally healthy
-# (a relaunch is in progress) or while this count is already below a prior
-# expected count (config, or an existing baseline). That short interval is
-# the grace period.
+# minimum. helperStableSinceMs is the window start. helperHealthySamples counts
+# healthy ticks in the window. The window starts at the first locally healthy
+# sample and is not reset when the count changes. A higher count does not move
+# the minimum. A lower count moves it only after two consecutive healthy ticks
+# at that count, so one blip does not lock the low value in. A count of 0 is
+# not a candidate and is never learned. Learn once, after HELPER_BASELINE_SEC
+# and at least 3 healthy samples, as that minimum. An already-learned baseline
+# is never raised or lowered. Do not learn while the process is not locally
+# healthy (a relaunch is in progress; that tick does not seed the minimum) or
+# while this count is already below a prior expected count (config, or an
+# existing baseline). That short interval is the grace period.
 prior_expected = None
 if h_expected_cfg is not None and h_expected_cfg > 0:
     prior_expected = h_expected_cfg
@@ -578,26 +586,33 @@ below_prior = (
 if helper_count is not None:
     if not locally_healthy:
         stable_since = now_ms
-        stable_count = helper_count if helper_count > 0 else None
-    elif stable_since is None:
-        stable_since = now_ms
-        if helper_count > 0 and not below_prior:
+        stable_count = None
+        healthy_samples = 0
+    elif helper_count > 0 and not below_prior:
+        prev_samples = as_int(prev.get("helperHealthySamples")) if same_pid else None
+        prev_count = as_int(prev.get("helperCount")) if same_pid else None
+        if stable_count is None or stable_count <= 0:
+            # First healthy sample. An unhealthy tick stamps the clock but
+            # must not start the window or seed the minimum.
+            if stable_since is None or not prev_samples:
+                stable_since = now_ms
             stable_count = helper_count
-    elif helper_count > 0 and not below_prior and (
-        stable_count is None or stable_count <= 0 or helper_count < stable_count
-    ):
-        stable_count = helper_count
-    if (
-        baseline is None
-        and locally_healthy
-        and not below_prior
-        and helper_count > 0
-        and stable_count is not None
-        and stable_count > 0
-        and stable_since is not None
-        and (now_ms - stable_since) / 1000.0 >= h_baseline_sec
-    ):
-        baseline = stable_count
+        elif (
+            helper_count < stable_count
+            and prev_count == helper_count
+            and prev_samples
+        ):
+            stable_count = helper_count
+        healthy_samples = healthy_samples + 1
+        if (
+            baseline is None
+            and stable_count is not None
+            and stable_count > 0
+            and stable_since is not None
+            and healthy_samples >= 3
+            and (now_ms - stable_since) / 1000.0 >= h_baseline_sec
+        ):
+            baseline = stable_count
 
 if h_expected_cfg is not None:
     expected, expected_src = h_expected_cfg, "config"
@@ -788,6 +803,7 @@ if scan_out:
         "helperBaselinePid": pid if (baseline is not None or stable_count is not None) else None,
         "helperStableCount": stable_count,
         "helperStableSinceMs": stable_since,
+        "helperHealthySamples": healthy_samples,
         "helperMissingSinceMs": missing_since,
         "helperMissingForSec": missing_for,
         "helperSockets": helper_sockets,
@@ -1064,14 +1080,14 @@ if scan_path:
 tree = scan.pop("tree", []) if isinstance(scan, dict) else []
 for k in ("helperCheck", "healOnHelperMissing", "helperCount", "helperPids", "helperExpected",
           "helperExpectedSource", "helperBaseline", "helperBaselinePid", "helperStableCount",
-          "helperStableSinceMs", "helperMissingSinceMs", "helperMissingForSec", "helperSockets",
+          "helperStableSinceMs", "helperHealthySamples", "helperMissingSinceMs", "helperMissingForSec", "helperSockets",
           "helperFloorPending", "helperNoneSeen"):
     data[k] = scan.get(k)
 # .disable and app_missing return before the scan. An empty scan must not wipe a
 # learned baseline or an open missing clock. A relaunch still has its own rules below.
 if action != "relaunch" and "helperCheck" not in scan:
     for k in ("helperExpected", "helperExpectedSource", "helperBaseline", "helperBaselinePid",
-              "helperStableCount", "helperStableSinceMs", "helperMissingSinceMs",
+              "helperStableCount", "helperStableSinceMs", "helperHealthySamples", "helperMissingSinceMs",
               "helperMissingForSec", "helperFloorPending"):
         if k in prev and data.get(k) is None:
             data[k] = prev.get(k)
@@ -1099,6 +1115,7 @@ def arm_helper_floor(data_obj, prev_obj, new_pid):
         data_obj["helperBaselinePid"] = new_pid
     data_obj["helperStableCount"] = None
     data_obj["helperStableSinceMs"] = None
+    data_obj["helperHealthySamples"] = None
     data_obj["helperMissingSinceMs"] = None
     data_obj["helperMissingForSec"] = None
 
@@ -1109,7 +1126,7 @@ if action == "relaunch" and (reason == "helper_missing" or short_interval_open(s
     arm_helper_floor(data, prev, pint(pid))
 elif action == "relaunch":
     for k in ("helperBaseline", "helperBaselinePid", "helperStableCount", "helperStableSinceMs",
-              "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending"):
+              "helperHealthySamples", "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending"):
         data[k] = None
 
 # Diagnostics snapshot on non-ok ticks, rate-limited per status+reason.
@@ -1117,6 +1134,10 @@ for k in ("lastSnapshotAtMs", "lastSnapshot", "lastSnapshotStatus", "lastSnapsho
           "snapshotBackoffMs"):
     if prev.get(k) is not None:
         data[k] = prev.get(k)
+# An ok tick clears the doubled gap. The next outage starts again at
+# HEAL_SNAPSHOT_MIN_SEC instead of waiting out a backoff that grew to 4h.
+if status == "ok":
+    data["snapshotBackoffMs"] = None
 if status not in ("ok", "disabled"):
     try:
         min_ms = int(float(os.environ.get("W_SNAP_MIN") or 900) * 1000)

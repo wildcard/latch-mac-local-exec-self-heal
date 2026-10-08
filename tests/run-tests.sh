@@ -42,8 +42,9 @@ setup_env() {
   export HEAL_CURSOR=0
   unset HEAL_SWAP_SUPPORT_ON_RELAUNCH || true
   unset HEAL_NOW_MS || true
-  # Helper observer: canned ps/lsof so no test reads the host process table.
-  # HEAL_TEST_MODE is what makes those hooks live; without it the script ignores them.
+  # Helper observer: canned ps/lsof unless a test turns the hooks off.
+  # T-helper-ps-hook-requires-test-mode calls the real ps binary and must not
+  # see the fixture. HEAL_TEST_MODE is what makes the canned hooks live.
   export HEAL_TEST_MODE=1
   export HELPER_CHECK=1
   export HEAL_ON_HELPER_MISSING=0
@@ -665,7 +666,7 @@ t_helper_fields_healthy() {
 t_helper_learn_baseline() {
   local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
-  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 700000))}"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 700000)),\"helperHealthySamples\":2}"
   run_heal
   [[ "$(jget helperBaseline)" == "2" ]] || die "baseline=$(jget helperBaseline)"
   [[ "$(jget helperExpected)" == "2" ]] || die "expected=$(jget helperExpected)"
@@ -682,14 +683,68 @@ t_helper_learn_needs_stable_window() {
 }
 
 t_helper_learn_not_while_unhealthy() {
-  # boot not ready: count may be stable, but it must not become the baseline.
-  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  # boot not ready: count may be stable, but it must not become the baseline,
+  # and it must not seed the running minimum.
+  local now t1 t2 t3 t4 t5
+  now="$(now_ms)"; export HEAL_NOW_MS="$now"
   materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
   seed_state "{\"version\":2,\"status\":\"cooldown\",\"pid\":4242,\"lastHealAtMs\":$((now - 10000)),\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 700000))}"
   run_heal
   [[ "$(jget status)" == "cooldown" ]] || die "status=$(jget status)"
   [[ "$(jget helperBaseline)" == "None" ]] || die "learned while unhealthy"
   [[ "$(jget helperStableSinceMs)" == "$now" ]] || die "stable clock not reset while unhealthy"
+  [[ "$(jget helperStableCount)" == "None" ]] || die "unhealthy seeded min=$(jget helperStableCount)"
+  [[ "$(jget helperCount)" == "2" ]] || die "boot count=$(jget helperCount)"
+
+  # No heartbeat yet, live count 1. That 1 must not become the minimum.
+  # Steady 2 after that learns 2, so a later 2 to 1 still observes.
+  rm -f "$HEAL_STATE"
+  rm -rf "$GROK_SUPPORT_DIR/dune-reliability"
+  : > "$HEAL_LOG"
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/no-heartbeat" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget reason)" == "process_up_no_heartbeat_file" ]] || die "no-hb reason=$(jget reason)"
+  [[ "$(jget helperCount)" == "1" ]] || die "no-hb count=$(jget helperCount)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "no-hb learned $(jget helperBaseline)"
+  [[ "$(jget helperStableCount)" == "None" ]] || die "no-hb seeded min=$(jget helperStableCount)"
+
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  t1=$((now + 60000))
+  export HEAL_NOW_MS="$t1"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t1"
+  run_heal
+  [[ "$(jget helperCount)" == "2" ]] || die "steady count=$(jget helperCount)"
+  [[ "$(jget helperStableCount)" == "2" ]] || die "min after healthy=$(jget helperStableCount)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned on first healthy tick"
+  t2=$((t1 + 60000))
+  export HEAL_NOW_MS="$t2"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t2"
+  run_heal
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned before 3 samples"
+  t3=$((t1 + 600000))
+  export HEAL_NOW_MS="$t3"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t3"
+  run_heal
+  [[ "$(jget helperBaseline)" == "2" ]] || die "baseline=$(jget helperBaseline)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "expected=$(jget helperExpected)"
+  [[ "$(jget status)" == "ok" ]] || die "learn status=$(jget status)"
+
+  stage_ps "$FIX/helpers/one-helper.ps"
+  t4=$((t3 + 60000))
+  export HEAL_NOW_MS="$t4"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t4"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "drop grace status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget helperBaseline)" == "2" ]] || die "baseline moved on the drop"
+  t5=$((t4 + 400000))
+  export HEAL_NOW_MS="$t5"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t5"
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "2 to 1 status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "2 to 1 reason=$(jget reason)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "2 to 1 expected=$(jget helperExpected)"
+  [[ "$(jget helperCount)" == "1" ]] || die "2 to 1 count=$(jget helperCount)"
 }
 
 t_helper_baseline_never_lowers() {
@@ -1077,6 +1132,40 @@ t_snapshot_rate_limited_and_pruned() {
   [[ "$(snap_count)" == "2" ]] || die "not pruned to HEAL_SNAPSHOT_KEEP: $(snap_count)"
 }
 
+t_snapshot_backoff_resets_on_ok() {
+  # A 4h backoff must not survive an ok tick. The next outage snapshots
+  # once the base gap has elapsed, not after another 4h.
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000 ",\"lastSnapshotAtMs\":$((now - 1000000)),\"lastSnapshotStatus\":\"observe\",\"lastSnapshotReason\":\"helper_missing\",\"snapshotBackoffMs\":14400000"
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "still-short status=$(jget status)"
+  [[ "$(snap_count)" == "0" ]] || die "4h backoff wrote a snapshot: $(snap_count)"
+  [[ "$(jget snapshotBackoffMs)" == "14400000" ]] || die "backoff=$(jget snapshotBackoffMs)"
+
+  export HEAL_NOW_MS=$((now + 60000))
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$HEAL_NOW_MS"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "recover status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget snapshotBackoffMs)" == "None" ]] || die "ok kept backoff=$(jget snapshotBackoffMs)"
+  [[ "$(snap_count)" == "0" ]] || die "ok tick snapshotted: $(snap_count)"
+
+  local drop=$((now + 120000))
+  export HEAL_NOW_MS="$drop"
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$drop"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "new grace status=$(jget status)"
+  export HEAL_NOW_MS=$((drop + 400000))
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$HEAL_NOW_MS"
+  run_heal
+  [[ "$(jget status)" == "observe" ]] || die "new outage status=$(jget status) reason=$(jget reason)"
+  [[ "$(snap_count)" == "1" ]] || die "new outage snapshots=$(snap_count)"
+  [[ "$(jget snapshotBackoffMs)" != "14400000" ]] || die "4h backoff survived the ok tick"
+}
+
 # Oct 7 shape: main pid and a moving fresh heartbeat stay healthy while one
 # NodeService helper is gone (2 → 1). Under the grace window that is still ok.
 # Past HELPER_MISSING_SEC the default is log-only plus a snapshot. With
@@ -1184,9 +1273,9 @@ plistlib.dump({"Label": "x", "EnvironmentVariables": {
     open(sys.argv[1], "wb"))
 PY
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "install failed"
-  # Operator overrides win. The template only pins HEAL_ON_HELPER_MISSING=0.
-  # HELPER_MISSING_SEC and the other numeric keys are script defaults; an operator
-  # value already on disk is still preserved.
+  # Operator overrides win, including HEAL_ON_HELPER_MISSING. The template does
+  # not pin that key. HELPER_MISSING_SEC and the other numeric keys are script
+  # defaults; an operator value already on disk is still preserved.
   # Beacon env is still preserved. Kit-owned PATH comes from the template.
   t_install_env_check "$pl" "HEAL_ON_HELPER_MISSING=1;HELPER_MISSING_SEC=120;HELPER_BASELINE_SEC=900;HELPER_EXPECTED=2;BEACON_URL=https://example.invalid;HEAL_ON_STUCK_SESSION=1;PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
     || die "helper env not preserved"
@@ -1196,24 +1285,47 @@ t_install_template_helper_defaults() {
   local home="$TMP/home3"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
   mkdir -p "$home"
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "fresh install failed"
-  t_install_env_check "$pl" "HEAL_ON_HELPER_MISSING=0" || die "template helper defaults"
-  # Numeric helper defaults stay in the script. Writing them into the plist would freeze
-  # them on reinstall (install.sh preserves every string key except PATH, and drops HEAL_TEST_MODE).
+  # Absent means the script default (0). Pinning 0 in the template would make
+  # a reinstall look like the operator chose log-only.
   python3 - "$pl" <<'PY' || die "script-owned helper defaults must not be pinned by the template"
 import plistlib, sys
 env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
-for key in ("HELPER_EXPECTED", "HELPER_MISSING_SEC", "HELPER_BASELINE_SEC", "HELPER_RELAUNCH_WINDOW_SEC"):
+for key in ("HEAL_ON_HELPER_MISSING", "HELPER_EXPECTED", "HELPER_MISSING_SEC", "HELPER_BASELINE_SEC", "HELPER_RELAUNCH_WINDOW_SEC"):
     assert key not in env, (key, env)
 PY
 }
 
+t_install_helper_missing_opt_in_survives() {
+  # An operator who set HEAL_ON_HELPER_MISSING=1 keeps it across reinstall.
+  # A plist that never had the key still omits it (script default 0).
+  local home="$TMP/home-optin"
+  local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
+  mkdir -p "$home"
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "fresh install failed"
+  python3 - "$pl" <<'PY' || die "fresh install pinned HEAL_ON_HELPER_MISSING"
+import plistlib, sys
+env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
+assert "HEAL_ON_HELPER_MISSING" not in env, env
+PY
+  python3 - "$pl" <<'PY'
+import plistlib, sys
+path = sys.argv[1]
+pl = plistlib.load(open(path, "rb"))
+pl["EnvironmentVariables"]["HEAL_ON_HELPER_MISSING"] = "1"
+plistlib.dump(pl, open(path, "wb"))
+PY
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "reinstall failed"
+  t_install_env_check "$pl" "HEAL_ON_HELPER_MISSING=1" || die "opt-in forced back to 0"
+}
+
 t_helper_baseline_never_rises() {
   # A third helper held for hours must not raise an already-learned 2.
-  # 4h is long enough that a 2h half-life histogram would move the baseline.
+  # The stored minimum is 2: that is the value learn-once kept. A live count
+  # of 3 is above the minimum, so the seed is a state the min can actually hold.
   local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
   stage_ps "$FIX/helpers/three-helpers.ps"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
-  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":3,\"helperStableSinceMs\":$((now - 14400000))}"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 14400000)),\"helperHealthySamples\":3}"
   run_heal
   [[ "$(jget helperCount)" == "3" ]] || die "helperCount=$(jget helperCount)"
   [[ "$(jget helperBaseline)" == "2" ]] || die "baseline raised to $(jget helperBaseline)"
@@ -1576,7 +1688,7 @@ t_helper_baseline_sec_clamped() {
   seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 30000))}"
   run_heal
   [[ "$(jget helperBaseline)" == "None" ]] || die "learned inside 60s floor: $(jget helperBaseline)"
-  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 70000))}"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperHealthySamples\":2,\"helperStableSinceMs\":$((now - 70000))}"
   run_heal
   [[ "$(jget helperBaseline)" == "2" ]] || die "70s did not learn under clamp: $(jget helperBaseline)"
   export HELPER_BASELINE_SEC=abc
@@ -1695,11 +1807,10 @@ PY
 t_helper_transient_high_at_launch() {
   # A first scan can catch 3 helpers mid-launch. Learn the minimum positive
   # count over the window that started on that first scan, not the high.
-  # Count 2 has been present for 500s (< HELPER_BASELINE_SEC). The window
-  # from the first scan has elapsed, so resetting the clock on a count
-  # change would still be waiting, and locking in the first count would
-  # learn 3.
-  local now t2 t3
+  # One tick at 2 does not lower the minimum. The second consecutive 2 does.
+  # That second 2 is still short of HELPER_BASELINE_SEC on its own, so a
+  # clock reset on the count change would not learn yet.
+  local now t2 t3 t4
   now="$(now_ms)"; export HEAL_NOW_MS="$now"
   stage_ps "$FIX/helpers/three-helpers.ps"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
@@ -1717,13 +1828,20 @@ t_helper_transient_high_at_launch() {
   run_heal
   [[ "$(jget helperCount)" == "2" ]] || die "second count=$(jget helperCount)"
   [[ "$(jget helperBaseline)" == "None" ]] || die "learned before the window: $(jget helperBaseline)"
-  [[ "$(jget helperStableCount)" == "2" ]] || die "min did not fall: $(jget helperStableCount)"
+  [[ "$(jget helperStableCount)" == "3" ]] || die "one low tick moved the min: $(jget helperStableCount)"
   [[ "$(jget helperStableSinceMs)" == "$now" ]] || die "window reset on the drop: $(jget helperStableSinceMs)"
-  [[ "$(jget status)" == "ok" ]] || die "second status=$(jget status) reason=$(jget reason)"
 
-  t3=$((now + 600000))
+  t3=$((now + 160000))
   export HEAL_NOW_MS="$t3"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t3"
+  run_heal
+  [[ "$(jget helperStableCount)" == "2" ]] || die "second 2 did not lower min: $(jget helperStableCount)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned before the window: $(jget helperBaseline)"
+  [[ "$(jget helperStableSinceMs)" == "$now" ]] || die "window reset when the min fell: $(jget helperStableSinceMs)"
+
+  t4=$((now + 600000))
+  export HEAL_NOW_MS="$t4"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t4"
   run_heal
   [[ "$(jget helperCount)" == "2" ]] || die "steady count=$(jget helperCount)"
   [[ "$(jget helperBaseline)" == "2" ]] || die "baseline=$(jget helperBaseline)"
@@ -1735,6 +1853,93 @@ t_helper_transient_high_at_launch() {
   grep -q "heal start" "$HEAL_LOG" && die "healed a transient high" || true
 }
 
+t_helper_low_count_needs_two_ticks() {
+  # One low tick in the window must not lock the minimum. Two consecutive
+  # healthy ticks at the lower count do.
+  local now t
+  now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget helperStableCount)" == "2" ]] || die "start min=$(jget helperStableCount)"
+
+  t=$((now + 60000))
+  export HEAL_NOW_MS="$t"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t"
+  run_heal
+  stage_ps "$FIX/helpers/one-helper.ps"
+  t=$((now + 120000))
+  export HEAL_NOW_MS="$t"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t"
+  run_heal
+  [[ "$(jget helperCount)" == "1" ]] || die "blip count=$(jget helperCount)"
+  [[ "$(jget helperStableCount)" == "2" ]] || die "blip moved min: $(jget helperStableCount)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "blip learned $(jget helperBaseline)"
+
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  t=$((now + 180000))
+  export HEAL_NOW_MS="$t"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t"
+  run_heal
+  t=$((now + 600000))
+  export HEAL_NOW_MS="$t"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t"
+  run_heal
+  [[ "$(jget helperBaseline)" == "2" ]] || die "blip baseline=$(jget helperBaseline)"
+  [[ "$(jget status)" == "ok" ]] || die "blip status=$(jget status) reason=$(jget reason)"
+  grep -q "observe reason=helper_missing" "$HEAL_LOG" && die "observed a one-tick blip" || true
+
+  rm -f "$HEAL_STATE"
+  : > "$HEAL_LOG"
+  export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  t=$((now + 60000))
+  export HEAL_NOW_MS="$t"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t"
+  run_heal
+  stage_ps "$FIX/helpers/one-helper.ps"
+  t=$((now + 120000))
+  export HEAL_NOW_MS="$t"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t"
+  run_heal
+  [[ "$(jget helperStableCount)" == "2" ]] || die "first 1 moved min: $(jget helperStableCount)"
+  t=$((now + 180000))
+  export HEAL_NOW_MS="$t"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t"
+  run_heal
+  [[ "$(jget helperCount)" == "1" ]] || die "second 1 count=$(jget helperCount)"
+  [[ "$(jget helperStableCount)" == "1" ]] || die "two 1s did not count: $(jget helperStableCount)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned inside the short window: $(jget helperBaseline)"
+}
+
+t_helper_learn_needs_three_samples() {
+  # Two healthy samples across a sleep gap are not enough, even past 600s.
+  local now t2 t3
+  now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget helperHealthySamples)" == "1" ]] || die "samples=$(jget helperHealthySamples)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned on sample 1"
+
+  t2=$((now + 700000))
+  export HEAL_NOW_MS="$t2"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t2"
+  run_heal
+  [[ "$(jget helperHealthySamples)" == "2" ]] || die "samples=$(jget helperHealthySamples)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "two samples across a gap learned $(jget helperBaseline)"
+
+  t3=$((t2 + 60000))
+  export HEAL_NOW_MS="$t3"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t3"
+  run_heal
+  [[ "$(jget helperHealthySamples)" == "3" ]] || die "samples=$(jget helperHealthySamples)"
+  [[ "$(jget helperBaseline)" == "2" ]] || die "third sample baseline=$(jget helperBaseline)"
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
+}
+
 t_helper_expected_mitigates_late_drop() {
   # A late second helper does not raise a learned 1, even after hours.
   # HELPER_EXPECTED=2 is the mitigation: a later drop to 1 observes.
@@ -1742,7 +1947,7 @@ t_helper_expected_mitigates_late_drop() {
   now="$(now_ms)"; export HEAL_NOW_MS="$now"
   stage_ps "$FIX/helpers/one-helper.ps"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
-  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":1,\"helperStableSinceMs\":$((now - 700000))}"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaselinePid\":4242,\"helperStableCount\":1,\"helperStableSinceMs\":$((now - 700000)),\"helperHealthySamples\":2}"
   run_heal
   [[ "$(jget helperBaseline)" == "1" ]] || die "did not learn 1: $(jget helperBaseline)"
   [[ "$(jget status)" == "ok" ]] || die "learn status=$(jget status)"
@@ -1920,6 +2125,17 @@ if bad:
     sys.stderr.write("apostrophe inside $(...) heredoc:\n" + "\n".join(bad) + "\n")
     sys.exit(1)
 PY
+  local bash32="${BASH32:-}"
+  if [[ -z "$bash32" && -x /tmp/bash-3.2-cache/bin/bash ]]; then
+    bash32=/tmp/bash-3.2-cache/bin/bash
+  fi
+  if [[ -n "$bash32" && -x "$bash32" ]]; then
+    "$bash32" -n "$ROOT/grok-bot-local-exec-heal.sh" || die "bash 3.2 -n heal"
+    "$bash32" -n "$ROOT/install.sh" || die "bash 3.2 -n install"
+    "$bash32" -n "$ROOT/tests/run-tests.sh" || die "bash 3.2 -n tests"
+  else
+    echo "NOTICE: bash 3.2 not found (set BASH32); skipped bash -n under bash 3.2"
+  fi
 }
 
 t_skipped_scan_keeps_baseline() {
@@ -2105,6 +2321,8 @@ run_case T-helper-learn-not-while-unhealthy t_helper_learn_not_while_unhealthy
 run_case T-helper-baseline-never-lowers t_helper_baseline_never_lowers
 run_case T-helper-baseline-never-rises t_helper_baseline_never_rises
 run_case T-helper-transient-high-at-launch t_helper_transient_high_at_launch
+run_case T-helper-low-count-needs-two-ticks t_helper_low_count_needs_two_ticks
+run_case T-helper-learn-needs-three-samples t_helper_learn_needs_three_samples
 run_case T-helper-expected-mitigates-late-drop t_helper_expected_mitigates_late_drop
 run_case T-bash32-command-subst-heredoc-no-apostrophe t_bash32_command_subst_heredoc_no_apostrophe
 run_case T-nonfinite-status-still-heals t_nonfinite_status_still_heals
@@ -2138,7 +2356,9 @@ run_case T-helper-check-off t_helper_check_off
 run_case T-helper-ps-unreadable-no-signal t_helper_ps_unreadable_no_signal
 run_case T-helper-sockets-counts-no-addresses t_helper_sockets_counts_no_addresses
 run_case T-snapshot-rate-limited-and-pruned t_snapshot_rate_limited_and_pruned
+run_case T-snapshot-backoff-resets-on-ok t_snapshot_backoff_resets_on_ok
 run_case T-install-template-helper-defaults t_install_template_helper_defaults
+run_case T-install-helper-missing-opt-in-survives t_install_helper_missing_opt_in_survives
 run_case T-install-preserves-helper-env t_install_preserves_helper_env
 run_case T-oct7-helper-drop-replay t_oct7_helper_drop_replay
 echo
