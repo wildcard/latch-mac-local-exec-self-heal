@@ -63,7 +63,7 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 - [ ] `cd worker-beacon && npm test` -> 15 of 15 pass.
 - [ ] `bash -n grok-bot-local-exec-heal.sh install.sh tests/run-tests.sh`
 
-**1.5.0 (PR branch `feat/kit-1.5.0-helper-missing`):** Linux `passed=94 failed=0` on GNU bash 5.2.21 and on compiled bash 3.2.57, after the polish on top of `4397151`. Learn-once is the minimum positive count over a window that needs at least three healthy samples. An unhealthy tick does not seed that minimum. A lower count lowers it only after two consecutive healthy ticks. The tick that would complete the window does not learn while its count is still below that minimum. A learned baseline of 1 with `HELPER_EXPECTED` unset sets `helperBaselineLow` and a log-only hint. An ok tick clears snapshot backoff. The plist template does not pin `HEAL_ON_HELPER_MISSING`. `bash -n` is clean on both bashes.
+**1.5.0 (PR branch `feat/kit-1.5.0-helper-missing`):** Linux `passed=94 failed=0` on GNU bash 5.2.21 and on compiled bash 3.2.57. macOS at `a1a18d6` is `passed=94 failed=0` on `/bin/bash` 3.2.57. Learn-once is the minimum positive count over a window that needs at least three healthy samples. An unhealthy tick does not seed that minimum. A lower count lowers it only after two consecutive healthy ticks. The tick that would complete the window does not learn while its count is still below that minimum. A learned baseline of 1 with `HELPER_EXPECTED` unset sets `helperBaselineLow` and a log-only hint. An ok tick clears snapshot backoff. The plist template does not pin `HEAL_ON_HELPER_MISSING`. `bash -n` is clean on both bashes.
 
 macOS verification already recorded, on macOS 26.6.2 arm64, bash 3.2.57, python3 3.9.6, lsof 4.91:
 
@@ -73,8 +73,9 @@ macOS verification already recorded, on macOS 26.6.2 arm64, bash 3.2.57, python3
 - `6e1d580`: bash 3.2.57 `passed=8 failed=77`. A lone apostrophe inside a `$(...)` heredoc failed to parse (`grok-bot-local-exec-heal.sh: line 139: unexpected EOF while looking for matching ')'`).
 - `69e091b`: macOS `/bin/bash` 3.2.57 with a launchd `PATH`, macOS verifier: **`passed=87 failed=0`**, `bash -n` clean.
 - `4397151`: macOS 26.6.2 arm64, `/bin/bash` 3.2.57, python3 3.9.6, lsof 4.91, launchd `PATH`: **`passed=91 failed=0`**. `bash -n` clean on `grok-bot-local-exec-heal.sh`, `install.sh`, and `tests/run-tests.sh`. Live read-only dry-run: 2/2 NodeService helpers. `lsof` exit 1 with no output records 0 sockets.
+- `a1a18d6`: macOS 26.6.2 (25G83) arm64, `/bin/bash` 3.2.57, python3 3.9.6, lsof 4.91, launchd `PATH`, macOS verifier: **`passed=94 failed=0`**. `BASH32` was unset, so the bash 3.x guard used the `/bin/bash` fallback. `bash -n` clean on `grok-bot-local-exec-heal.sh`, `install.sh`, and `tests/run-tests.sh`. Live read-only dry-run: 2/2 NodeService helpers, `HELPER_EXPECTED=2` stays ok, a forced expected of 3 observes with no relaunch, snapshot modes `0600`/`0700`, backoff cleared on an ok tick, and `lsof` exit 1 with no output records 0 sockets. The `env -u` post-install tick was verified with a path containing a space.
 
-Reviewers recorded that 91/0 result at `4397151`. The polish commit after it changes the learn guard and a log-only hint in the heal script, clears test hooks on the installer post-tick, and updates tests and docs. This tip still needs a macOS re-run. This environment compiled GNU bash 3.2.57 and ran `bash -n` plus the suite under it.
+macOS verifier recorded `passed=94 failed=0` at `a1a18d6`. This environment also compiled GNU bash 3.2.57 and ran `bash -n` plus the suite under it (`passed=94 failed=0`).
 
 **Last verified (1.4.2):** 2026-10-05 (live beacon heal on kit 1.4.1: Prove C′ PASS), branch `fix/kit-1.4.2-token-perms-capability-checks` at the PR tip: macOS `passed=44 failed=0`, Linux with GNU `stat` `passed=44 failed=0`, worker 15/15 on both (receipts under `~/workspace/extensions/latch-receipts/kit-1.4.2/`).
 
