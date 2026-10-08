@@ -1208,11 +1208,12 @@ PY
 }
 
 t_helper_baseline_never_rises() {
-  # A third helper held past HELPER_BASELINE_SEC must not raise an already-learned 2.
+  # A third helper held for hours must not raise an already-learned 2.
+  # 4h is long enough that a 2h half-life histogram would move the baseline.
   local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
   stage_ps "$FIX/helpers/three-helpers.ps"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
-  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":3,\"helperStableSinceMs\":$((now - 700000))}"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":3,\"helperStableSinceMs\":$((now - 14400000))}"
   run_heal
   [[ "$(jget helperCount)" == "3" ]] || die "helperCount=$(jget helperCount)"
   [[ "$(jget helperBaseline)" == "2" ]] || die "baseline raised to $(jget helperBaseline)"
@@ -1317,6 +1318,7 @@ for needle in (
     "fixture-bearer-token", "fixture-query-secret", "Authorization", "Bearer",
     "fixture-user", "fixture-handle", "fixture-secret", "fixture-grandchild",
     "example.invalid", "user-data-dir", "seatbelt",
+    "PROBESECRET8", "PROBE-SECRET-9",
 ):
     assert needle not in blob, needle
 by_pid = {p["pid"]: p for p in s["processTree"]}
@@ -1325,6 +1327,9 @@ assert browser["exe"] == "other" and browser["type"] == "other" and browser["sub
 assert curl["exe"] == "other" and curl["type"] == "other" and curl["subType"] is None, curl
 quoted = by_pid[4502]
 assert quoted["exe"] == "other" and quoted["type"] == "other" and quoted["subType"] is None, quoted
+probe = by_pid[4510]
+assert probe["exe"] == "other" and probe["subType"] is None, probe
+assert 4510 not in (s.get("helperPids") or [])
 gpu = by_pid[4290]
 assert gpu["exe"] == "Grok Bot Helper" and gpu["type"] == "gpu-process", gpu
 allowed = {"utility", "renderer", "gpu-process", "zygote", "other"}
@@ -1440,6 +1445,7 @@ for needle in (
     "fixture-bearer-token", "fixture-query-secret", "Authorization", "Bearer",
     "fixture-user", "fixture-handle", "user-data-dir", "seatbelt",
     "should-not-appear", "example.invalid", "203.0.113", "192.0.2",
+    "PROBESECRET8", "PROBE-SECRET-9",
 ):
     assert needle not in blob, needle
 by_pid = {p["pid"]: p for p in s["processTree"]}
@@ -1456,6 +1462,9 @@ assert by_pid[4501]["exe"] == "other" and by_pid[4501]["type"] == "other"
 assert by_pid[4502]["exe"] == "other" and by_pid[4502]["type"] == "other"
 assert 4502 not in s["helperPids"] and 4503 not in s["helperPids"]
 assert by_pid[4503]["exe"] == "other"
+probe = by_pid[4510]
+assert probe["exe"] == "other" and probe["subType"] is None, probe
+assert 4510 not in s["helperPids"]
 allowed = {"utility", "renderer", "gpu-process", "zygote", "other"}
 assert all(p.get("type") in allowed for p in s["processTree"]), s["processTree"]
 PY
@@ -1683,11 +1692,53 @@ assert s.get("bootOutcome") in (None, "ready"), s.get("bootOutcome")
 PY
 }
 
-t_helper_late_second_then_drop() {
-  # Hypothesis, not the Oct 7 record: helper 2 can appear hours after main.
-  # A learned 1 must be able to move to 2, and a later 2→1 must still fire.
-  # A third helper that has not outweighed the 2h half-life must not make 2 look missing.
-  local now t1 t2 t3 t4 t5 t6
+t_helper_transient_high_at_launch() {
+  # A first scan can catch 3 helpers mid-launch. Learn the minimum positive
+  # count over the window that started on that first scan, not the high.
+  # Count 2 has been present for 500s (< HELPER_BASELINE_SEC). The window
+  # from the first scan has elapsed, so resetting the clock on a count
+  # change would still be waiting, and locking in the first count would
+  # learn 3.
+  local now t2 t3
+  now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/three-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget helperCount)" == "3" ]] || die "first count=$(jget helperCount)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned on the first tick: $(jget helperBaseline)"
+  [[ "$(jget helperStableCount)" == "3" ]] || die "min=$(jget helperStableCount)"
+  [[ "$(jget helperStableSinceMs)" == "$now" ]] || die "window=$(jget helperStableSinceMs)"
+  [[ "$(jget status)" == "ok" ]] || die "first status=$(jget status)"
+
+  t2=$((now + 100000))
+  export HEAL_NOW_MS="$t2"
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t2"
+  run_heal
+  [[ "$(jget helperCount)" == "2" ]] || die "second count=$(jget helperCount)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned before the window: $(jget helperBaseline)"
+  [[ "$(jget helperStableCount)" == "2" ]] || die "min did not fall: $(jget helperStableCount)"
+  [[ "$(jget helperStableSinceMs)" == "$now" ]] || die "window reset on the drop: $(jget helperStableSinceMs)"
+  [[ "$(jget status)" == "ok" ]] || die "second status=$(jget status) reason=$(jget reason)"
+
+  t3=$((now + 600000))
+  export HEAL_NOW_MS="$t3"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t3"
+  run_heal
+  [[ "$(jget helperCount)" == "2" ]] || die "steady count=$(jget helperCount)"
+  [[ "$(jget helperBaseline)" == "2" ]] || die "baseline=$(jget helperBaseline)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "expected=$(jget helperExpected)"
+  [[ "$(jget helperExpectedSource)" == "learned" ]] || die "src=$(jget helperExpectedSource)"
+  [[ "$(jget status)" == "ok" ]] || die "learn status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  grep -q "observe reason=helper_missing" "$HEAL_LOG" && die "observed a transient high" || true
+  grep -q "heal start" "$HEAL_LOG" && die "healed a transient high" || true
+}
+
+t_helper_expected_mitigates_late_drop() {
+  # A late second helper does not raise a learned 1, even after hours.
+  # HELPER_EXPECTED=2 is the mitigation: a later drop to 1 observes.
+  local now t1 t2 t3
   now="$(now_ms)"; export HEAL_NOW_MS="$now"
   stage_ps "$FIX/helpers/one-helper.ps"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
@@ -1696,50 +1747,179 @@ t_helper_late_second_then_drop() {
   [[ "$(jget helperBaseline)" == "1" ]] || die "did not learn 1: $(jget helperBaseline)"
   [[ "$(jget status)" == "ok" ]] || die "learn status=$(jget status)"
 
-  t1=$((now + 60000))
+  t1=$((now + 14400000))
   export HEAL_NOW_MS="$t1"
   stage_ps "$FIX/helpers/two-helpers.ps"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t1"
   run_heal
   [[ "$(jget helperCount)" == "2" ]] || die "pair count=$(jget helperCount)"
-  [[ "$(jget helperBaseline)" == "1" ]] || die "raised on the first pair tick: $(jget helperBaseline)"
-
-  t2=$((t1 + 14400000))
-  export HEAL_NOW_MS="$t2"
-  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t2"
-  run_heal
-  [[ "$(jget helperBaseline)" == "2" ]] || die "late pair did not become baseline: $(jget helperBaseline)"
-  [[ "$(jget helperExpected)" == "2" ]] || die "expected=$(jget helperExpected)"
+  [[ "$(jget helperBaseline)" == "1" ]] || die "late pair raised baseline: $(jget helperBaseline)"
+  [[ "$(jget helperExpected)" == "1" ]] || die "expected=$(jget helperExpected)"
   [[ "$(jget status)" == "ok" ]] || die "pair status=$(jget status) reason=$(jget reason)"
 
-  t3=$((t2 + 60000))
-  export HEAL_NOW_MS="$t3"
-  stage_ps "$FIX/helpers/three-helpers.ps"
-  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t3"
-  run_heal
-  t4=$((t3 + 700000))
-  export HEAL_NOW_MS="$t4"
-  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t4"
-  run_heal
-  [[ "$(jget helperCount)" == "3" ]] || die "third count=$(jget helperCount)"
-  [[ "$(jget helperBaseline)" == "2" ]] || die "third helper raised baseline: $(jget helperBaseline)"
-  [[ "$(jget status)" == "ok" ]] || die "third status=$(jget status) reason=$(jget reason)"
-
-  t5=$((t4 + 60000))
-  export HEAL_NOW_MS="$t5"
+  export HELPER_EXPECTED=2
+  t2=$((t1 + 60000))
+  export HEAL_NOW_MS="$t2"
   stage_ps "$FIX/helpers/one-helper.ps"
-  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t5"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t2"
   run_heal
   [[ "$(jget status)" == "ok" ]] || die "drop grace status=$(jget status) reason=$(jget reason)"
-  [[ "$(jget helperBaseline)" == "2" ]] || die "baseline lowered on the drop: $(jget helperBaseline)"
-  t6=$((t5 + 400000))
-  export HEAL_NOW_MS="$t6"
-  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t6"
+  [[ "$(jget helperBaseline)" == "1" ]] || die "baseline changed on the drop: $(jget helperBaseline)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "grace expected=$(jget helperExpected)"
+  [[ "$(jget helperCount)" == "1" ]] || die "grace count=$(jget helperCount)"
+  t3=$((t2 + 400000))
+  export HEAL_NOW_MS="$t3"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t3"
   run_heal
-  [[ "$(jget status)" == "observe" ]] || die "2→1 status=$(jget status) reason=$(jget reason)"
-  [[ "$(jget reason)" == "helper_missing" ]] || die "2→1 reason=$(jget reason)"
-  [[ "$(jget helperExpected)" == "2" ]] || die "2→1 expected=$(jget helperExpected)"
-  [[ "$(jget helperCount)" == "1" ]] || die "2→1 count=$(jget helperCount)"
+  [[ "$(jget status)" == "observe" ]] || die "2 to 1 status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "2 to 1 reason=$(jget reason)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "2 to 1 expected=$(jget helperExpected)"
+  [[ "$(jget helperCount)" == "1" ]] || die "2 to 1 count=$(jget helperCount)"
+  grep -q "heal start" "$HEAL_LOG" && die "log-only healed the late drop" || true
+}
+
+t_bash32_command_subst_heredoc_no_apostrophe() {
+  # bash 3.2 scans for quotes inside a quoted heredoc when that heredoc sits
+  # in $(...). One apostrophe in a comment makes the LaunchAgent fail to parse.
+  # Balanced quotes in python -c are a different form and are not flagged.
+  python3 - "$ROOT/grok-bot-local-exec-heal.sh" "$ROOT/install.sh" <<'PY' || die "apostrophe in command-subst heredoc"
+import sys
+
+def command_subst_heredoc_bodies(text):
+    i = 0
+    n = len(text)
+    depth = 0
+    arith = 0
+    in_sq = False
+    in_dq = False
+    stack = []
+    found = []
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        nxt2 = text[i + 2] if i + 2 < n else ""
+        if in_sq:
+            if c == "'":
+                in_sq = False
+            i += 1
+            continue
+        if in_dq:
+            if c == "\\" and nxt:
+                i += 2
+                continue
+            if c == '"':
+                in_dq = False
+            elif c == "$" and nxt == "(":
+                if nxt2 == "(":
+                    arith += 1
+                    i += 3
+                else:
+                    stack.append((in_sq, in_dq, arith))
+                    in_sq = False
+                    in_dq = False
+                    arith = 0
+                    depth += 1
+                    i += 2
+                continue
+            i += 1
+            continue
+        if c == "\\" and nxt:
+            i += 2
+            continue
+        if c == "'":
+            in_sq = True
+            i += 1
+            continue
+        if c == '"':
+            in_dq = True
+            i += 1
+            continue
+        if c == "#" and (i == 0 or text[i - 1] in " \t\n;{}()|&"):
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "$" and nxt == "(":
+            if nxt2 == "(":
+                arith += 1
+                i += 3
+                continue
+            stack.append((in_sq, in_dq, arith))
+            in_sq = False
+            in_dq = False
+            arith = 0
+            depth += 1
+            i += 2
+            continue
+        if c == ")" and arith > 0 and nxt == ")":
+            arith -= 1
+            i += 2
+            continue
+        if c == ")" and depth > 0:
+            depth -= 1
+            if stack:
+                in_sq, in_dq, arith = stack.pop()
+            i += 1
+            continue
+        if c == "<" and nxt == "<" and depth > 0:
+            j = i + 2
+            if j < n and text[j] == "-":
+                j += 1
+            delim = ""
+            if j < n and text[j] in ("'", '"'):
+                q = text[j]
+                k = text.find(q, j + 1)
+                if k < 0:
+                    i += 1
+                    continue
+                delim = text[j + 1:k]
+                j = k + 1
+            else:
+                k = j
+                while k < n and (text[k].isalnum() or text[k] == "_"):
+                    k += 1
+                delim = text[j:k]
+                j = k
+            if delim:
+                nl = text.find("\n", j)
+                if nl < 0:
+                    i = n
+                    continue
+                start = nl + 1
+                rest = text[start:]
+                body_lines = []
+                pos = 0
+                for line in rest.splitlines(True):
+                    if line.rstrip("\r\n") == delim:
+                        break
+                    body_lines.append(line)
+                    pos += len(line)
+                body = "".join(body_lines)
+                line_no = text.count("\n", 0, start) + 1
+                found.append((line_no, body))
+                i = start + pos
+                continue
+            i = j
+            continue
+        i += 1
+    return found
+
+bad = []
+seen = 0
+for path in sys.argv[1:]:
+    text = open(path).read()
+    bodies = command_subst_heredoc_bodies(text)
+    seen += len(bodies)
+    for line_no, body in bodies:
+        for offset, line in enumerate(body.splitlines()):
+            if "'" in line:
+                bad.append("%s:%d: %s" % (path, line_no + offset, line.strip()[:160]))
+if seen < 1:
+    sys.stderr.write("no command-substitution heredoc found\n")
+    sys.exit(1)
+if bad:
+    sys.stderr.write("apostrophe inside $(...) heredoc:\n" + "\n".join(bad) + "\n")
+    sys.exit(1)
+PY
 }
 
 t_skipped_scan_keeps_baseline() {
@@ -1924,7 +2104,9 @@ run_case T-helper-learn-needs-stable-window t_helper_learn_needs_stable_window
 run_case T-helper-learn-not-while-unhealthy t_helper_learn_not_while_unhealthy
 run_case T-helper-baseline-never-lowers t_helper_baseline_never_lowers
 run_case T-helper-baseline-never-rises t_helper_baseline_never_rises
-run_case T-helper-late-second-then-drop t_helper_late_second_then_drop
+run_case T-helper-transient-high-at-launch t_helper_transient_high_at_launch
+run_case T-helper-expected-mitigates-late-drop t_helper_expected_mitigates_late_drop
+run_case T-bash32-command-subst-heredoc-no-apostrophe t_bash32_command_subst_heredoc_no_apostrophe
 run_case T-nonfinite-status-still-heals t_nonfinite_status_still_heals
 run_case T-skipped-scan-keeps-baseline t_skipped_scan_keeps_baseline
 run_case T-helper-under-threshold t_helper_under_threshold

@@ -68,10 +68,9 @@ HEAL_ON_HELPER_MISSING="${HEAL_ON_HELPER_MISSING:-0}"
 HELPER_MISSING_SEC="${HELPER_MISSING_SEC:-300}"
 # Explicit expected helper count. Empty = use the baseline learned from the healthy state.
 HELPER_EXPECTED="${HELPER_EXPECTED:-}"
-# A count must hold this long, with the main pid locally healthy, before it is learned once.
-# An already-learned baseline is never lowered. It may rise only when a higher count's decayed
-# time outweighs a 2h half-life (see the histogram below). HELPER_EXPECTED wins when set.
-# Values under 60s would store a blip; non-numeric falls back to 600.
+# A count is learned once, as the minimum positive count seen over this window after the
+# pid appears. An already-learned baseline is never raised or lowered. HELPER_EXPECTED wins
+# when set. Values under 60s would store a blip; non-numeric falls back to 600.
 HELPER_BASELINE_SEC="${HELPER_BASELINE_SEC:-600}"
 HELPER_RELAUNCH_WINDOW_SEC="${HELPER_RELAUNCH_WINDOW_SEC:-3600}"
 HELPER_NAME="${HELPER_NAME:-Grok Bot Helper}"
@@ -374,10 +373,16 @@ app_path = (os.environ.get("H_APP_PATH", "") or "").rstrip("/")
 h_subtype_value = h_sub.split("=", 1)[1]
 
 # comm is an argv[0] the process can rewrite. Only the real Grok Bot names are stored.
-# "Grok Bot Helper (Renderer)" is a known comm; anything else, including a secret stuffed
-# into the name, becomes "other".
-_KNOWN_EXE = re.compile(r"^Grok Bot(?: Helper(?: \([A-Za-z0-9]{1,24}\))?)?$")
+# Helper suffixes are exactly (GPU), (Renderer), (Plugin), (Alerts). Anything else is other.
+_KNOWN_EXE = re.compile(r"^Grok Bot(?: Helper(?: \((?:GPU|Renderer|Plugin|Alerts)\))?)?$")
 _SNAP_TYPES = ("utility", "renderer", "gpu-process", "zygote", "other")
+_SNAP_SUBTYPES = (
+    "node.mojom.NodeService",
+    "network.mojom.NetworkService",
+    "storage.mojom.StorageService",
+    "audio.mojom.AudioService",
+    "video_capture.mojom.VideoCaptureService",
+)
 
 def exe_from_comm(comm):
     base = os.path.basename((comm or "").strip())
@@ -390,6 +395,11 @@ def snap_type(value):
         return value
     return "other"
 
+def snap_subtype(value):
+    if value in _SNAP_SUBTYPES:
+        return value
+    return None
+
 def safe_flag(value):
     if value is None:
         return None
@@ -398,7 +408,7 @@ def safe_flag(value):
     return None
 
 def under_app(command):
-    # argv0 must be the app bundle's Contents tree. A shell that only quotes
+    # argv0 must be the app bundle Contents tree. A shell that only quotes
     # "$APP/Contents/..." later in the command is not a helper.
     if not command or not app_path:
         return False
@@ -482,15 +492,19 @@ try:
                     continue
                 in_app = under_app(cmd)
                 if in_app:
-                    ptype, psub = allowlisted_flags(cmd)
+                    ptype, raw_sub = allowlisted_flags(cmd)
                     ptype = snap_type(ptype)
+                    # Count uses the raw subtype so a custom HELPER_SUBTYPE still matches.
+                    # The stored field is the allowlist only, so an unknown subtype
+                    # cannot land in a snapshot.
+                    psub = snap_subtype(raw_sub)
                 else:
-                    ptype, psub = "other", None
+                    ptype, raw_sub, psub = "other", None, None
                     cmd = ""
                 exe = exe_from_comm(comm)
                 tree.append({"pid": p_, "ppid": pp_, "etime": etime, "exe": exe,
                              "type": ptype, "subType": psub})
-                if pp_ == pid and in_app and exe.startswith(h_name) and psub == h_subtype_value:
+                if pp_ == pid and in_app and exe.startswith(h_name) and raw_sub == h_subtype_value:
                     helper_pids.append(p_)
             helper_pids.sort()
             helper_count = len(helper_pids)
@@ -537,81 +551,53 @@ else:
     baseline = None
     stable_count = None
     stable_since = None
-# Decayed time-at-count for this pid. Not carried across a pid change: a new
-# process starts its own histogram. Weights are seconds, half-life 2h.
-hist = {}
-hist_at = None
-if same_pid and isinstance(prev.get("helperHist"), dict):
-    for hk, hw in prev.get("helperHist").items():
-        try:
-            ik = int(hk)
-            fw = float(hw)
-        except Exception:
-            continue
-        if isinstance(hw, bool) or ik <= 0 or not math.isfinite(fw) or fw <= 0:
-            continue
-        hist[str(ik)] = fw
-    hist_at = as_int(prev.get("helperHistAtMs"))
 locally_healthy = bool(
     alive and heartbeat_age is not None and heartbeat_age <= stale_sec
     and (not boot or boot == "ready") and not frozen_hit
 )
+# Running minimum of positive counts on this pid. helperStableCount is that
+# minimum. helperStableSinceMs is the window start. No other baseline state.
+# The window starts at the first locally healthy sample and is not reset when
+# the count changes. A higher count does not move the minimum. A count of 0
+# is not a candidate and is never learned. Learn once, after
+# HELPER_BASELINE_SEC, as that minimum. An already-learned baseline is never
+# raised or lowered. Do not learn while the process is not locally healthy
+# (a relaunch is in progress) or while this count is already below a prior
+# expected count (config, or an existing baseline). That short interval is
+# the grace period.
+prior_expected = None
+if h_expected_cfg is not None and h_expected_cfg > 0:
+    prior_expected = h_expected_cfg
+elif baseline is not None and baseline > 0:
+    prior_expected = baseline
+below_prior = (
+    helper_count is not None
+    and prior_expected is not None
+    and helper_count < prior_expected
+)
 if helper_count is not None:
-    if (not locally_healthy) or stable_count != helper_count or stable_since is None:
+    if not locally_healthy:
         stable_since = now_ms
-    stable_count = helper_count
-    # Learn once while nothing is stored. Never lower an existing baseline.
-    # A higher count can replace it only after its decayed time outweighs both
-    # the stored weight and a 2h half-life, so a late second helper becomes the
-    # baseline and a transient third helper does not.
+        stable_count = helper_count if helper_count > 0 else None
+    elif stable_since is None:
+        stable_since = now_ms
+        if helper_count > 0 and not below_prior:
+            stable_count = helper_count
+    elif helper_count > 0 and not below_prior and (
+        stable_count is None or stable_count <= 0 or helper_count < stable_count
+    ):
+        stable_count = helper_count
     if (
         baseline is None
         and locally_healthy
+        and not below_prior
         and helper_count > 0
+        and stable_count is not None
+        and stable_count > 0
+        and stable_since is not None
         and (now_ms - stable_since) / 1000.0 >= h_baseline_sec
     ):
-        baseline = helper_count
-
-HALF_LIFE_SEC = 7200.0
-
-def decayed_mass(dt_sec):
-    if dt_sec <= 0:
-        return 0.0
-    lam = math.log(2.0) / HALF_LIFE_SEC
-    return (1.0 - math.exp(-lam * dt_sec)) / lam
-
-if helper_count is not None:
-    dt = 0.0
-    if hist_at is not None:
-        dt = max(0.0, (now_ms - hist_at) / 1000.0)
-        if dt > 0 and hist:
-            factor = 0.5 ** (dt / HALF_LIFE_SEC)
-            hist = dict((k, w * factor) for k, w in hist.items() if w * factor >= 1.0)
-    # No stored histogram yet (older state, or the first tick on this pid):
-    # give the current baseline a 2h prior so one stable window cannot raise it.
-    if prev_baseline is not None and not hist and hist_at is None and baseline is not None:
-        hist[str(int(baseline))] = float(HALF_LIFE_SEC)
-    stable_for = 0.0
-    credit = 0.0
-    if locally_healthy and helper_count > 0 and stable_since is not None and stable_count == helper_count:
-        stable_for = max(0.0, (now_ms - stable_since) / 1000.0)
-        if hist_at is None:
-            credit = decayed_mass(stable_for)
-        else:
-            credit = decayed_mass(min(dt, stable_for))
-    if credit > 0:
-        hk = str(helper_count)
-        hist[hk] = hist.get(hk, 0.0) + credit
-    hist_at = now_ms
-    if (
-        h_expected_cfg is None
-        and baseline is not None
-        and locally_healthy
-        and helper_count > baseline
-        and stable_for >= h_baseline_sec
-        and hist.get(str(helper_count), 0.0) > max(hist.get(str(int(baseline)), 0.0), float(HALF_LIFE_SEC))
-    ):
-        baseline = helper_count
+        baseline = stable_count
 
 if h_expected_cfg is not None:
     expected, expected_src = h_expected_cfg, "config"
@@ -806,8 +792,6 @@ if scan_out:
         "helperMissingForSec": missing_for,
         "helperSockets": helper_sockets,
         "helperFloorPending": floor_pending,
-        "helperHist": dict((k, round(v, 1)) for k, v in hist.items()) if hist else None,
-        "helperHistAtMs": hist_at,
         "helperNoneSeen": helper_none_seen,
         "desktopStatus": desktop_pub,
         "dune": dune_pub,
@@ -1081,14 +1065,14 @@ tree = scan.pop("tree", []) if isinstance(scan, dict) else []
 for k in ("helperCheck", "healOnHelperMissing", "helperCount", "helperPids", "helperExpected",
           "helperExpectedSource", "helperBaseline", "helperBaselinePid", "helperStableCount",
           "helperStableSinceMs", "helperMissingSinceMs", "helperMissingForSec", "helperSockets",
-          "helperFloorPending", "helperHist", "helperHistAtMs", "helperNoneSeen"):
+          "helperFloorPending", "helperNoneSeen"):
     data[k] = scan.get(k)
 # .disable and app_missing return before the scan. An empty scan must not wipe a
 # learned baseline or an open missing clock. A relaunch still has its own rules below.
 if action != "relaunch" and "helperCheck" not in scan:
     for k in ("helperExpected", "helperExpectedSource", "helperBaseline", "helperBaselinePid",
               "helperStableCount", "helperStableSinceMs", "helperMissingSinceMs",
-              "helperMissingForSec", "helperFloorPending", "helperHist", "helperHistAtMs"):
+              "helperMissingForSec", "helperFloorPending"):
         if k in prev and data.get(k) is None:
             data[k] = prev.get(k)
 def short_interval_open(scan_obj, prev_obj):
@@ -1117,8 +1101,6 @@ def arm_helper_floor(data_obj, prev_obj, new_pid):
     data_obj["helperStableSinceMs"] = None
     data_obj["helperMissingSinceMs"] = None
     data_obj["helperMissingForSec"] = None
-    data_obj["helperHist"] = None
-    data_obj["helperHistAtMs"] = None
 
 if action == "relaunch" and (reason == "helper_missing" or short_interval_open(scan, prev)):
     # helper_missing, and also beacon / operator / heartbeat_stale / process_down
@@ -1127,8 +1109,7 @@ if action == "relaunch" and (reason == "helper_missing" or short_interval_open(s
     arm_helper_floor(data, prev, pint(pid))
 elif action == "relaunch":
     for k in ("helperBaseline", "helperBaselinePid", "helperStableCount", "helperStableSinceMs",
-              "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending",
-              "helperHist", "helperHistAtMs"):
+              "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending"):
         data[k] = None
 
 # Diagnostics snapshot on non-ok ticks, rate-limited per status+reason.

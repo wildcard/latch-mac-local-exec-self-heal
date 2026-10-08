@@ -100,6 +100,15 @@ ROWS = [
         "Bearer fixture-bearer-token",
         "/bin/echo should-not-appear-in-snapshot",
     ),
+    (
+        4510,
+        4242,
+        "00:01",
+        "Grok Bot Helper (PROBESECRET8)",
+        APP
+        + "/Contents/Frameworks/Grok Bot Helper (PROBESECRET8).app/Contents/MacOS/Grok Bot Helper (PROBESECRET8)"
+        + " --type=utility --utility-sub-type=PROBE-SECRET-9",
+    ),
 ]
 
 
