@@ -60,8 +60,9 @@ HELPER_CHECK="${HELPER_CHECK:-1}"
 # 0 = log-only (status=observe, reason=helper_missing, no relaunch). 1 = relaunch via the normal
 # quit/open path (single-flight lock, COOLDOWN_SEC). After that relaunch the old expected count
 # stays a floor: while the live count is still short the kit stays helper_suppressed, including
-# after HELPER_RELAUNCH_WINDOW_SEC. A later outage can relaunch only once the count has met the
-# floor and the window has elapsed.
+# after HELPER_RELAUNCH_WINDOW_SEC. A beacon, operator, heartbeat-stale, or process-down
+# relaunch keeps the same floor when a helper-short interval is already open. A later outage
+# can relaunch only once the count has met the floor and the window has elapsed.
 HEAL_ON_HELPER_MISSING="${HEAL_ON_HELPER_MISSING:-0}"
 # Helper count below the expected level for at least this long → helper_missing.
 HELPER_MISSING_SEC="${HELPER_MISSING_SEC:-300}"
@@ -69,6 +70,7 @@ HELPER_MISSING_SEC="${HELPER_MISSING_SEC:-300}"
 HELPER_EXPECTED="${HELPER_EXPECTED:-}"
 # A count must hold this long, with the main pid locally healthy, before it is learned once.
 # An already-learned baseline is never raised or lowered for that pid. HELPER_EXPECTED wins when set.
+# Values under 60s would store a blip; non-numeric falls back to 600.
 HELPER_BASELINE_SEC="${HELPER_BASELINE_SEC:-600}"
 HELPER_RELAUNCH_WINDOW_SEC="${HELPER_RELAUNCH_WINDOW_SEC:-3600}"
 HELPER_NAME="${HELPER_NAME:-Grok Bot Helper}"
@@ -101,6 +103,11 @@ if [[ ! "$HELPER_RELAUNCH_WINDOW_SEC" =~ ^[0-9]+$ ]]; then
   HELPER_RELAUNCH_WINDOW_SEC=3600
 elif (( HELPER_RELAUNCH_WINDOW_SEC < 1 )); then
   HELPER_RELAUNCH_WINDOW_SEC=1
+fi
+if [[ ! "$HELPER_BASELINE_SEC" =~ ^[0-9]+$ ]]; then
+  HELPER_BASELINE_SEC=600
+elif (( HELPER_BASELINE_SEC < 60 )); then
+  HELPER_BASELINE_SEC=60
 fi
 # Diagnostics snapshot on non-ok ticks (not ok / disabled). Rate-limited per status+reason.
 HEAL_SNAPSHOT_DIR="${HEAL_SNAPSHOT_DIR:-}"
@@ -526,8 +533,10 @@ helper_hit = False
 if helper_count is not None and expected is not None and expected > 0 and helper_count >= expected:
     floor_pending = False
 elif helper_count is not None and expected is not None and expected > 0 and helper_count < expected:
-    if same_pid or floor_carry:
-        missing_since = prev_missing_was if prev_missing_was is not None else now_ms
+    # Same pid keeps the open clock. An external pid change (floor_carry) restarts
+    # it so the new process gets a fresh HELPER_MISSING_SEC of grace.
+    if same_pid and prev_missing_was is not None:
+        missing_since = prev_missing_was
     else:
         missing_since = now_ms
     missing_for = (now_ms - missing_since) / 1000.0
@@ -556,7 +565,10 @@ elif heartbeat_age > stale_sec:
     reason = "heartbeat_stale_%ds" % int(heartbeat_age)
     readiness = "heartbeat_stale"
 elif boot and boot != "ready":
-    token = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in str(boot))
+    # Alphanumeric, dash, underscore only, and only the first 32 characters.
+    # A raw bootOutcome must not land unbounded in reason, the log, or a snapshot.
+    raw_boot = str(boot)[:32]
+    token = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in raw_boot) or "unknown"
     need = True
     reason = "boot_outcome_%s" % token
     readiness = "boot_not_ready"
@@ -973,17 +985,38 @@ for k in ("helperCheck", "healOnHelperMissing", "helperCount", "helperPids", "he
           "helperStableSinceMs", "helperMissingSinceMs", "helperMissingForSec", "helperSockets",
           "helperFloorPending", "helperNoneSeen"):
     data[k] = scan.get(k)
-if action == "relaunch" and reason == "helper_missing":
+def short_interval_open(scan_obj, prev_obj):
+    # This tick saw the count below expected.
+    if scan_obj.get("helperMissingSinceMs") is not None:
+        return True
+    # Not scanned (process down, or ps failed). An interval already open, or a
+    # floor already pending, is still the best knowledge we have.
+    if scan_obj.get("helperCount") is None and (
+        prev_obj.get("helperMissingSinceMs") is not None or prev_obj.get("helperFloorPending") is True
+    ):
+        return True
+    return False
+
+def arm_helper_floor(data_obj, prev_obj, new_pid):
     # Keep the pre-relaunch expected count as a floor on the new pid. Restart the
     # missing grace, but do not store the short count as a learned baseline.
-    data["helperFloorPending"] = True
-    new_pid = pint(pid)
+    if data_obj.get("helperBaseline") is None:
+        kept = prev_obj.get("helperBaseline")
+        if isinstance(kept, int) and not isinstance(kept, bool) and kept > 0:
+            data_obj["helperBaseline"] = kept
+    data_obj["helperFloorPending"] = True
     if new_pid is not None:
-        data["helperBaselinePid"] = new_pid
-    data["helperStableCount"] = None
-    data["helperStableSinceMs"] = None
-    data["helperMissingSinceMs"] = None
-    data["helperMissingForSec"] = None
+        data_obj["helperBaselinePid"] = new_pid
+    data_obj["helperStableCount"] = None
+    data_obj["helperStableSinceMs"] = None
+    data_obj["helperMissingSinceMs"] = None
+    data_obj["helperMissingForSec"] = None
+
+if action == "relaunch" and (reason == "helper_missing" or short_interval_open(scan, prev)):
+    # helper_missing, and also beacon / operator / heartbeat_stale / process_down
+    # when a helper-short interval is still open. A relaunch that is not short
+    # still clears the floor below.
+    arm_helper_floor(data, prev, pint(pid))
 elif action == "relaunch":
     for k in ("helperBaseline", "helperBaselinePid", "helperStableCount", "helperStableSinceMs",
               "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending"):
