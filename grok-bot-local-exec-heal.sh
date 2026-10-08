@@ -71,7 +71,9 @@ HELPER_EXPECTED="${HELPER_EXPECTED:-}"
 # A count is learned once, as the minimum positive count seen over this window after the
 # pid appears. The window needs at least 3 healthy samples, not only elapsed time.
 # A lower count updates that minimum only after 2 consecutive healthy ticks.
-# An unhealthy tick does not seed it. An already-learned baseline is never raised or
+# The tick that would complete the window does not learn while its count is
+# still below that minimum. An unhealthy tick does not seed it.
+# An already-learned baseline is never raised or
 # lowered. HELPER_EXPECTED wins when set. Values under 60s would store a blip;
 # non-numeric falls back to 600.
 HELPER_BASELINE_SEC="${HELPER_BASELINE_SEC:-600}"
@@ -566,9 +568,11 @@ locally_healthy = bool(
 # healthy ticks in the window. The window starts at the first locally healthy
 # sample and is not reset when the count changes. A higher count does not move
 # the minimum. A lower count moves it only after two consecutive healthy ticks
-# at that count, so one blip does not lock the low value in. A count of 0 is
-# not a candidate and is never learned. Learn once, after HELPER_BASELINE_SEC
-# and at least 3 healthy samples, as that minimum. An already-learned baseline
+# at that count, so one blip does not lock the low value in. The tick that
+# would complete the window does not learn while its count is still below
+# that minimum. A count of 0 is not a candidate and is never learned. Learn
+# once, after HELPER_BASELINE_SEC and at least 3 healthy samples, as that
+# minimum. An already-learned baseline
 # is never raised or lowered. Do not learn while the process is not locally
 # healthy (a relaunch is in progress; that tick does not seed the minimum) or
 # while this count is already below a prior expected count (config, or an
@@ -604,10 +608,13 @@ if helper_count is not None:
         ):
             stable_count = helper_count
         healthy_samples = healthy_samples + 1
+        # A window-completing tick whose count is still below the minimum
+        # must not learn. One low sample stays a blip.
         if (
             baseline is None
             and stable_count is not None
             and stable_count > 0
+            and helper_count >= stable_count
             and stable_since is not None
             and healthy_samples >= 3
             and (now_ms - stable_since) / 1000.0 >= h_baseline_sec
@@ -723,6 +730,18 @@ if helper_none_seen and str(reason).startswith("healthy") and not hint:
         "A renamed helper binary would look the same, so helper_missing cannot learn a baseline of 0. "
         "Not relaunching from this flag alone."
     )
+# Log and state only. A learned 1 with no operator expected count must not
+# change status, action, or whether this tick relaunches. The long-ok hint
+# stays in place when it is already set.
+helper_baseline_low = bool(
+    baseline == 1 and not (h_expected_cfg is not None and h_expected_cfg > 0)
+)
+if helper_baseline_low and str(reason).startswith("healthy") and not hint:
+    hint = (
+        "helper_baseline_low: learned helper baseline is 1 and HELPER_EXPECTED is unset. "
+        "Set HELPER_EXPECTED=2 for the live-baseline week if this Mac runs two NodeService helpers. "
+        "This flag does not relaunch."
+    )
 
 # Socket counts only on ticks that will snapshot (not every healthy tick).
 # macOS lsof 4.91 exits 1 with empty stdout and empty stderr when none of the
@@ -789,6 +808,7 @@ emit("HELPER_COUNT", "" if helper_count is None else str(helper_count))
 emit("HELPER_EXPECTED_EFF", "" if expected is None else str(expected))
 emit("HELPER_MISSING_FOR", "" if missing_for is None else str(int(missing_for)))
 emit("HELPER_FLOOR_PENDING", "1" if floor_pending else "0")
+emit("HELPER_BASELINE_LOW", "1" if helper_baseline_low else "0")
 
 scan_out = os.environ.get("H_SCAN_OUT", "")
 if scan_out:
@@ -809,6 +829,7 @@ if scan_out:
         "helperSockets": helper_sockets,
         "helperFloorPending": floor_pending,
         "helperNoneSeen": helper_none_seen,
+        "helperBaselineLow": helper_baseline_low,
         "desktopStatus": desktop_pub,
         "dune": dune_pub,
         "tree": tree,
@@ -1081,14 +1102,14 @@ tree = scan.pop("tree", []) if isinstance(scan, dict) else []
 for k in ("helperCheck", "healOnHelperMissing", "helperCount", "helperPids", "helperExpected",
           "helperExpectedSource", "helperBaseline", "helperBaselinePid", "helperStableCount",
           "helperStableSinceMs", "helperHealthySamples", "helperMissingSinceMs", "helperMissingForSec", "helperSockets",
-          "helperFloorPending", "helperNoneSeen"):
+          "helperFloorPending", "helperNoneSeen", "helperBaselineLow"):
     data[k] = scan.get(k)
 # .disable and app_missing return before the scan. An empty scan must not wipe a
 # learned baseline or an open missing clock. A relaunch still has its own rules below.
 if action != "relaunch" and "helperCheck" not in scan:
     for k in ("helperExpected", "helperExpectedSource", "helperBaseline", "helperBaselinePid",
               "helperStableCount", "helperStableSinceMs", "helperHealthySamples", "helperMissingSinceMs",
-              "helperMissingForSec", "helperFloorPending"):
+              "helperMissingForSec", "helperFloorPending", "helperBaselineLow"):
         if k in prev and data.get(k) is None:
             data[k] = prev.get(k)
 def short_interval_open(scan_obj, prev_obj):
@@ -1128,6 +1149,7 @@ elif action == "relaunch":
     for k in ("helperBaseline", "helperBaselinePid", "helperStableCount", "helperStableSinceMs",
               "helperHealthySamples", "helperMissingSinceMs", "helperMissingForSec", "helperFloorPending"):
         data[k] = None
+    data["helperBaselineLow"] = False
 
 # Diagnostics snapshot on non-ok ticks, rate-limited per status+reason.
 for k in ("lastSnapshotAtMs", "lastSnapshot", "lastSnapshotStatus", "lastSnapshotReason",
@@ -1355,6 +1377,9 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 run_inspect
+if [[ "${HELPER_BASELINE_LOW:-0}" == "1" ]]; then
+  log "helper_baseline_low: learned baseline is 1 and HELPER_EXPECTED is unset; set HELPER_EXPECTED=2 for the live-baseline week"
+fi
 
 LAST_HEAL_MS=0
 LAST_BEACON_MS=0

@@ -1940,6 +1940,74 @@ t_helper_learn_needs_three_samples() {
   [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
 }
 
+t_helper_learn_skips_low_completing_tick() {
+  # The tick that finishes the window is a single 1 while the running min is 2.
+  # Do not learn 2 on that tick. The next healthy 2 still can.
+  local now t2
+  now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperCount\":2,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 700000)),\"helperHealthySamples\":2}"
+  run_heal
+  [[ "$(jget helperCount)" == "1" ]] || die "count=$(jget helperCount)"
+  [[ "$(jget helperStableCount)" == "2" ]] || die "min=$(jget helperStableCount)"
+  [[ "$(jget helperHealthySamples)" == "3" ]] || die "samples=$(jget helperHealthySamples)"
+  [[ "$(jget helperBaseline)" == "None" ]] || die "learned on a low completing tick: $(jget helperBaseline)"
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  grep -q "observe reason=helper_missing" "$HEAL_LOG" && die "observed the completing dip" || true
+
+  t2=$((now + 60000))
+  export HEAL_NOW_MS="$t2"
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t2"
+  run_heal
+  [[ "$(jget helperCount)" == "2" ]] || die "recovered count=$(jget helperCount)"
+  [[ "$(jget helperBaseline)" == "2" ]] || die "recovered baseline=$(jget helperBaseline)"
+  [[ "$(jget helperBaselineLow)" == "False" ]] || die "low flag on baseline 2: $(jget helperBaselineLow)"
+  [[ "$(jget status)" == "ok" ]] || die "recovered status=$(jget status) reason=$(jget reason)"
+}
+
+t_helper_baseline_low_hint() {
+  # A learned 1 with HELPER_EXPECTED unset is visible. It does not relaunch,
+  # and it does not replace the long-ok hint. Setting HELPER_EXPECTED clears the flag.
+  local now t2
+  now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperCount\":1,\"helperBaselinePid\":4242,\"helperStableCount\":1,\"helperStableSinceMs\":$((now - 700000)),\"helperHealthySamples\":2}"
+  run_heal
+  [[ "$(jget helperBaseline)" == "1" ]] || die "baseline=$(jget helperBaseline)"
+  [[ "$(jget helperBaselineLow)" == "True" ]] || die "flag=$(jget helperBaselineLow)"
+  [[ "$(jget status)" == "ok" ]] || die "status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  [[ "$(jget escalateHint)" == *"HELPER_EXPECTED=2"* ]] || die "hint=$(jget escalateHint)"
+  grep -q "helper_baseline_low:" "$HEAL_LOG" || die "low baseline not logged"
+  grep -q "heal start" "$HEAL_LOG" && die "low baseline relaunched" || true
+
+  t2=$((now + 400000))
+  export HEAL_NOW_MS="$t2"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$t2"
+  run_heal
+  [[ "$(jget helperBaselineLow)" == "True" ]] || die "flag dropped on the long-ok tick: $(jget helperBaselineLow)"
+  [[ "$(jget escalateHint)" == *"S-NEW-D"* ]] || die "long-ok hint lost: $(jget escalateHint)"
+  [[ "$(jget escalateHint)" != *"helper_baseline_low"* ]] || die "low hint replaced long-ok: $(jget escalateHint)"
+  [[ "$(jget status)" == "ok" ]] || die "long-ok status=$(jget status) reason=$(jget reason)"
+  grep -q "heal start" "$HEAL_LOG" && die "long-ok low baseline relaunched" || true
+
+  export HELPER_EXPECTED=2
+  export HEAL_NOW_MS=$((t2 + 60000))
+  stage_ps "$FIX/helpers/two-helpers.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$HEAL_NOW_MS"
+  : > "$HEAL_LOG"
+  run_heal
+  [[ "$(jget helperBaseline)" == "1" ]] || die "config changed baseline=$(jget helperBaseline)"
+  [[ "$(jget helperExpected)" == "2" ]] || die "expected=$(jget helperExpected)"
+  [[ "$(jget helperBaselineLow)" == "False" ]] || die "flag stayed with HELPER_EXPECTED: $(jget helperBaselineLow)"
+  [[ "$(jget status)" == "ok" ]] || die "config status=$(jget status) reason=$(jget reason)"
+  grep -q "helper_baseline_low:" "$HEAL_LOG" && die "logged the low flag while HELPER_EXPECTED is set" || true
+}
+
 t_helper_expected_mitigates_late_drop() {
   # A late second helper does not raise a learned 1, even after hours.
   # HELPER_EXPECTED=2 is the mitigation: a later drop to 1 observes.
@@ -2126,6 +2194,13 @@ if bad:
     sys.exit(1)
 PY
   local bash32="${BASH32:-}"
+  if [[ -z "$bash32" && -x /bin/bash ]]; then
+    local bmaj
+    bmaj="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || true)"
+    if [[ "$bmaj" == "3" ]]; then
+      bash32=/bin/bash
+    fi
+  fi
   if [[ -z "$bash32" && -x /tmp/bash-3.2-cache/bin/bash ]]; then
     bash32=/tmp/bash-3.2-cache/bin/bash
   fi
@@ -2269,6 +2344,32 @@ t_install_fresh() {
   t_install_env_check "$pl" "COOLDOWN_SEC=300" || die "fresh plist wrong"
 }
 
+t_install_post_tick_drops_test_hooks() {
+  # The post-install tick must not inherit canned ps/lsof hooks from the shell
+  # that ran install.sh. INSTALL_SKIP_LAUNCHD returns before that tick, so this
+  # checks the installer source and runs the same env -u command against a stub.
+  local src="$ROOT/install.sh"
+  grep -q 'env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN "$SCRIPT_DST"' "$src" \
+    || die "post-install tick does not clear test hooks"
+  local stub="$TMP/post-tick.sh"
+  cat > "$stub" <<'EOF'
+#!/bin/bash
+printf 'mode=%s\nps=%s\nlsof=%s\npsbin=%s\nlsofbin=%s\n' \
+  "${HEAL_TEST_MODE-unset}" "${HELPER_PS_FILE-unset}" "${HELPER_LSOF_FILE-unset}" \
+  "${HELPER_PS_BIN-unset}" "${HELPER_LSOF_BIN-unset}"
+EOF
+  chmod +x "$stub"
+  local out
+  out="$(HEAL_TEST_MODE=1 HELPER_PS_FILE=/tmp/ps-hook HELPER_LSOF_FILE=/tmp/lsof-hook \
+    HELPER_PS_BIN=/tmp/ps-bin HELPER_LSOF_BIN=/tmp/lsof-bin \
+    env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN "$stub")"
+  [[ "$out" == *"mode=unset"* ]] || die "HEAL_TEST_MODE survived: $out"
+  [[ "$out" == *"ps=unset"* ]] || die "HELPER_PS_FILE survived: $out"
+  [[ "$out" == *"lsof=unset"* ]] || die "HELPER_LSOF_FILE survived: $out"
+  [[ "$out" == *"psbin=unset"* ]] || die "HELPER_PS_BIN survived: $out"
+  [[ "$out" == *"lsofbin=unset"* ]] || die "HELPER_LSOF_BIN survived: $out"
+}
+
 run_case T-healthy t_healthy
 run_case T-disable t_disable
 run_case T-cooldown t_cooldown
@@ -2323,6 +2424,8 @@ run_case T-helper-baseline-never-rises t_helper_baseline_never_rises
 run_case T-helper-transient-high-at-launch t_helper_transient_high_at_launch
 run_case T-helper-low-count-needs-two-ticks t_helper_low_count_needs_two_ticks
 run_case T-helper-learn-needs-three-samples t_helper_learn_needs_three_samples
+run_case T-helper-learn-skips-low-completing-tick t_helper_learn_skips_low_completing_tick
+run_case T-helper-baseline-low-hint t_helper_baseline_low_hint
 run_case T-helper-expected-mitigates-late-drop t_helper_expected_mitigates_late_drop
 run_case T-bash32-command-subst-heredoc-no-apostrophe t_bash32_command_subst_heredoc_no_apostrophe
 run_case T-nonfinite-status-still-heals t_nonfinite_status_still_heals
@@ -2360,6 +2463,7 @@ run_case T-snapshot-backoff-resets-on-ok t_snapshot_backoff_resets_on_ok
 run_case T-install-template-helper-defaults t_install_template_helper_defaults
 run_case T-install-helper-missing-opt-in-survives t_install_helper_missing_opt_in_survives
 run_case T-install-preserves-helper-env t_install_preserves_helper_env
+run_case T-install-post-tick-drops-test-hooks t_install_post_tick_drops_test_hooks
 run_case T-oct7-helper-drop-replay t_oct7_helper_drop_replay
 echo
 echo "passed=$PASS failed=$FAIL"

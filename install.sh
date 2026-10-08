@@ -174,8 +174,10 @@ echo "  last:   $LOG_DIR/GrokBotLocalExecHeal-last.json"
 echo "  disable: touch \"$HOME_DIR/Library/Application Support/Latch/grok-bot-local-exec-heal.disable\""
 echo "  force:   touch \"$HOME_DIR/Library/Application Support/Latch/grok-bot-local-exec-heal.request\""
 echo
-# dry-run once (real signals on this Mac; may relaunch if the app looks down)
-"$SCRIPT_DST" || true
+# dry-run once (real signals on this Mac; may relaunch if the app looks down).
+# Drop test hooks so a shell that exported them cannot feed canned ps/lsof
+# into the post-install tick. env -u is the macOS / bash 3.2 form.
+env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN "$SCRIPT_DST" || true
 if [[ -f "$LOG_DIR/GrokBotLocalExecHeal-last.json" ]]; then
   echo "Dry-run state:"
   cat "$LOG_DIR/GrokBotLocalExecHeal-last.json"
