@@ -54,7 +54,17 @@ setup_env() {
   export HELPER_SOCKET_CHECK=1
   export HELPER_LSOF_FILE="$FIX/helpers/sockets.lsof"
   unset HELPER_EXPECTED HEAL_SNAPSHOT_DIR HEAL_SNAPSHOT_KEEP HEAL_SNAPSHOT_MIN_SEC || true
-  mkdir -p "$GROK_APP_PATH" "$GROK_SUPPORT_DIR" "$LATCH_DIR" "$(dirname "$HEAL_LOG")"
+  # Production default is HEAL_ON_HELPER_MISSING=1. The suite pins 0 so the
+  # log-only cases stay explicit. Codex stays off unless a case opts in.
+  export CODEX_WATCH=0
+  export CODEX_REOPEN_POLICY=crash_only
+  export CODEX_READINESS_WAIT_SEC=1
+  export CODEX_READINESS_POLL_SEC=0
+  unset CODEX_PS_FILE CODEX_PS_AFTER_FILE CODEX_OPEN_BIN CODEX_CRASH_DIR CODEX_WAL_FILE CODEX_PAUSE || true
+  mkdir -p "$GROK_APP_PATH" "$GROK_SUPPORT_DIR" "$LATCH_DIR/bin" "$(dirname "$HEAL_LOG")"
+  cp "$ROOT/grok-bot-restart-guard.py" "$LATCH_DIR/bin/grok-bot-restart-guard.py"
+  cp "$ROOT/codex-watch.py" "$LATCH_DIR/bin/codex-watch.py"
+  chmod 755 "$LATCH_DIR/bin/grok-bot-restart-guard.py" "$LATCH_DIR/bin/codex-watch.py"
   stage_ps "$FIX/helpers/two-helpers.ps"
 }
 
@@ -124,7 +134,7 @@ t_healthy() {
   [[ "$(jget readiness)" == "local_healthy" ]] || die "readiness=$(jget readiness)"
   [[ "$(jget escalateHint)" == "None" ]] || die "hint=$(jget escalateHint)"
   [[ "$(jget pid)" == "4242" ]] || die "pid=$(jget pid)"
-  [[ "$(jget kitVersion)" == "1.5.0" ]] || die "kit=$(jget kitVersion)"
+  [[ "$(jget kitVersion)" == "1.6.0" ]] || die "kit=$(jget kitVersion)"
   [[ "$(jget lastHealAtMs)" == "None" ]] || die "unexpected heal stamp"
   grep -q "heal start" "$HEAL_LOG" && die "healthy tick relaunched" || true
 }
@@ -447,7 +457,7 @@ t_kit_version_matches() {
   local ver kit
   ver="$(tr -d '[:space:]' < "$ROOT/VERSION")"
   kit="$(grep -E '^KIT_VERSION=' "$HEAL" | head -1 | sed -E 's/^KIT_VERSION="//; s/"$//')"
-  [[ "$ver" == "1.5.0" ]] || die "VERSION=$ver"
+  [[ "$ver" == "1.6.0" ]] || die "VERSION=$ver"
   [[ "$kit" == "$ver" ]] || die "KIT_VERSION=$kit VERSION=$ver"
 }
 
@@ -645,6 +655,12 @@ seed_helper_missing() {
   seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"checkedAtMs\":$((now - 60000)),\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":1,\"helperStableSinceMs\":$((now - missing_ms)),\"helperMissingSinceMs\":$((now - missing_ms))${extra}}"
 }
 
+# The restart guard records an attempt before quit/open. Cases that relaunch
+# several times in one second clear it so they still test the floor, not backoff.
+clear_restart_ledger() {
+  rm -f "$LATCH_DIR/grok-bot-restart-attempts.json"
+}
+
 t_helper_fields_healthy() {
   local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
@@ -652,7 +668,9 @@ t_helper_fields_healthy() {
   [[ "$(jget status)" == "ok" ]] || die "status=$(jget status)"
   [[ "$(jget reason)" == "healthy" ]] || die "reason=$(jget reason)"
   [[ "$(jget helperCount)" == "2" ]] || die "helperCount=$(jget helperCount)"
-  [[ "$(jget helperSockets)" == "None" ]] || die "lsof ran on a healthy tick: $(jget helperSockets)"
+  [[ "$(jraw helperSockets)" == '{"4300": 2, "4301": 0}' ]] || die "healthy sockets=$(jraw helperSockets)"
+  grep -q "helper_sockets 4300:2,4301:0" "$HEAL_LOG" || die "healthy tick did not log socket counts"
+  ! grep -q "203.0.113\|192.0.2" "$HEAL_LOG" || die "address leaked into healthy log"
   [[ "$(jget helperNoneSeen)" == "False" ]] || die "helperNoneSeen=$(jget helperNoneSeen)"
   # Other-parent NodeService helper (7000), NetworkService (4302), renderer/GPU and a shell child are not counted.
   [[ "$(jraw helperPids)" == "[4300, 4301]" ]] || die "helperPids=$(jraw helperPids)"
@@ -1066,12 +1084,14 @@ t_helper_sockets_counts_no_addresses() {
     ! grep -q "203.0.113\|192.0.2" "$f" || die "address leaked into $f"
     ! grep -q "fixture-user\|fixture-handle\|fixture-secret\|fixture-grandchild" "$f" || die "argv leaked into $f"
   done
-  # A healthy tick does not run lsof.
+  # A healthy tick records socket counts and does not heal.
   stage_ps "$FIX/helpers/two-helpers.ps"
   rm -f "$HEAL_STATE"
   run_heal
   [[ "$(jget status)" == "ok" ]] || die "healthy status=$(jget status)"
-  [[ "$(jget helperSockets)" == "None" ]] || die "sockets on healthy tick=$(jget helperSockets)"
+  [[ "$(jraw helperSockets)" == '{"4300": 2, "4301": 0}' ]] || die "sockets on healthy tick=$(jraw helperSockets)"
+  grep -q "helper_sockets " "$HEAL_LOG" || die "healthy tick did not log sockets"
+  ! grep -q "203.0.113\|192.0.2" "$HEAL_LOG" || die "address leaked on healthy tick"
   # Snapshot tick with two helpers: the second has only a non-443 socket.
   export HELPER_EXPECTED=3
   seed_helper_missing "$now" 400000
@@ -1285,8 +1305,8 @@ t_install_template_helper_defaults() {
   local home="$TMP/home3"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
   mkdir -p "$home"
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "fresh install failed"
-  # Absent means the script default (0). Pinning 0 in the template would make
-  # a reinstall look like the operator chose log-only.
+  # Absent means the script default (1, policy (a)). Pinning 0 in the template would make
+  # a reinstall look like the operator chose log-only. Pinning 1 would freeze the new default.
   python3 - "$pl" <<'PY' || die "script-owned helper defaults must not be pinned by the template"
 import plistlib, sys
 env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
@@ -1296,7 +1316,8 @@ PY
 }
 
 t_install_helper_missing_opt_in_survives() {
-  # An operator who set HEAL_ON_HELPER_MISSING=1 keeps it across reinstall.
+  # An operator value of HEAL_ON_HELPER_MISSING is kept across reinstall.
+  # The template does not pin the key, so the script default applies when it is absent.
   # A plist that never had the key still omits it (script default 0).
   local home="$TMP/home-optin"
   local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
@@ -1632,6 +1653,7 @@ t_helper_floor_on_other_relaunches() {
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
   seed_helper_missing "$now" 400000
   touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  clear_restart_ledger
   run_heal
   [[ "$(jget reason)" == "operator_request" ]] || die "operator reason=$(jget reason)"
   [[ "$(jget helperBaselinePid)" == "5151" ]] || die "operator baseline pid=$(jget helperBaselinePid)"
@@ -1648,6 +1670,7 @@ t_helper_floor_on_other_relaunches() {
   : > "$BEACON_STUB_CALLS"
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
   seed_helper_missing "$now" 400000
+  clear_restart_ledger
   run_heal
   [[ "$(jget reason)" == "beacon_request" ]] || die "beacon reason=$(jget reason)"
   [[ "$(jget helperBaselinePid)" == "5151" ]] || die "beacon baseline pid=$(jget helperBaselinePid)"
@@ -1656,6 +1679,7 @@ t_helper_floor_on_other_relaunches() {
 
   materialize "$FIX/stale-hb" "$GROK_SUPPORT_DIR" "$now"
   seed_helper_missing "$now" 400000
+  clear_restart_ledger
   run_heal
   [[ "$(jget reason)" == heartbeat_stale_* ]] || die "stale reason=$(jget reason)"
   [[ "$(jget helperBaselinePid)" == "5151" ]] || die "stale baseline pid=$(jget helperBaselinePid)"
@@ -1664,6 +1688,7 @@ t_helper_floor_on_other_relaunches() {
   export HEAL_TRUST_PID=0
   materialize "$FIX/dead-pid" "$GROK_SUPPORT_DIR" "$now"
   seed_helper_missing "$now" 400000
+  clear_restart_ledger
   run_heal
   [[ "$(jget reason)" == "process_down" ]] || die "down reason=$(jget reason)"
   floor_kept process_down heal_failed
@@ -1673,6 +1698,7 @@ t_helper_floor_on_other_relaunches() {
   materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
   seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"helperBaseline\":2,\"helperBaselinePid\":4242,\"helperStableCount\":2,\"helperStableSinceMs\":$((now - 900000))}"
   touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  clear_restart_ledger
   run_heal
   [[ "$(jget reason)" == "operator_request" ]] || die "healthy-relaunch reason=$(jget reason)"
   [[ "$(jget status)" == "healed" ]] || die "healthy-relaunch status=$(jget status)"
@@ -2341,7 +2367,9 @@ t_install_fresh() {
   local home="$TMP/home2"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
   mkdir -p "$home"
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "fresh install failed"
-  t_install_env_check "$pl" "COOLDOWN_SEC=300" || die "fresh plist wrong"
+  t_install_env_check "$pl" "COOLDOWN_SEC=300;CODEX_REOPEN_POLICY=crash_only" || die "fresh plist wrong"
+  [[ -f "$home/Library/Application Support/Latch/bin/grok-bot-restart-guard.py" ]] || die "guard not installed"
+  [[ -f "$home/Library/Application Support/Latch/bin/codex-watch.py" ]] || die "codex watch not installed"
 }
 
 t_install_post_tick_drops_test_hooks() {
@@ -2349,25 +2377,31 @@ t_install_post_tick_drops_test_hooks() {
   # that ran install.sh. INSTALL_SKIP_LAUNCHD returns before that tick, so this
   # checks the installer source and runs the same env -u command against a stub.
   local src="$ROOT/install.sh"
-  grep -q 'env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN "$SCRIPT_DST"' "$src" \
+  grep -q 'env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN' "$src" \
     || die "post-install tick does not clear test hooks"
+  grep -q -- '-u CODEX_PS_FILE -u CODEX_PS_AFTER_FILE -u CODEX_OPEN_BIN -u CODEX_CRASH_DIR -u CODEX_WAL_FILE' "$src" \
+    || die "post-install tick does not clear codex test hooks"
   local stub="$TMP/post-tick.sh"
   cat > "$stub" <<'EOF'
 #!/bin/bash
-printf 'mode=%s\nps=%s\nlsof=%s\npsbin=%s\nlsofbin=%s\n' \
+printf 'mode=%s\nps=%s\nlsof=%s\npsbin=%s\nlsofbin=%s\ncodexps=%s\n' \
   "${HEAL_TEST_MODE-unset}" "${HELPER_PS_FILE-unset}" "${HELPER_LSOF_FILE-unset}" \
-  "${HELPER_PS_BIN-unset}" "${HELPER_LSOF_BIN-unset}"
+  "${HELPER_PS_BIN-unset}" "${HELPER_LSOF_BIN-unset}" "${CODEX_PS_FILE-unset}"
 EOF
   chmod +x "$stub"
   local out
   out="$(HEAL_TEST_MODE=1 HELPER_PS_FILE=/tmp/ps-hook HELPER_LSOF_FILE=/tmp/lsof-hook \
     HELPER_PS_BIN=/tmp/ps-bin HELPER_LSOF_BIN=/tmp/lsof-bin \
-    env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN "$stub")"
+    CODEX_PS_FILE=/tmp/codex-ps CODEX_PS_AFTER_FILE=/tmp/codex-after CODEX_OPEN_BIN=/tmp/codex-open \
+    CODEX_CRASH_DIR=/tmp/crashes CODEX_WAL_FILE=/tmp/wal \
+    env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN \
+    -u CODEX_PS_FILE -u CODEX_PS_AFTER_FILE -u CODEX_OPEN_BIN -u CODEX_CRASH_DIR -u CODEX_WAL_FILE "$stub")"
   [[ "$out" == *"mode=unset"* ]] || die "HEAL_TEST_MODE survived: $out"
   [[ "$out" == *"ps=unset"* ]] || die "HELPER_PS_FILE survived: $out"
   [[ "$out" == *"lsof=unset"* ]] || die "HELPER_LSOF_FILE survived: $out"
   [[ "$out" == *"psbin=unset"* ]] || die "HELPER_PS_BIN survived: $out"
   [[ "$out" == *"lsofbin=unset"* ]] || die "HELPER_LSOF_BIN survived: $out"
+  [[ "$out" == *"codexps=unset"* ]] || die "CODEX_PS_FILE survived: $out"
 }
 
 run_case T-healthy t_healthy
@@ -2465,6 +2499,451 @@ run_case T-install-helper-missing-opt-in-survives t_install_helper_missing_opt_i
 run_case T-install-preserves-helper-env t_install_preserves_helper_env
 run_case T-install-post-tick-drops-test-hooks t_install_post_tick_drops_test_hooks
 run_case T-oct7-helper-drop-replay t_oct7_helper_drop_replay
+
+cget() {
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])).get("codex") or {}
+v=d.get(sys.argv[2], None)
+print("None" if v is None else v)' "$HEAL_STATE" "$1"
+}
+
+codex_on() {
+  export CODEX_WATCH=1
+  export CODEX_APP_PATH="$TMP/ChatGPT.app"
+  mkdir -p "$CODEX_APP_PATH/Contents/MacOS"
+  export CODEX_CRASH_DIR="$TMP/codex-crashes"
+  mkdir -p "$CODEX_CRASH_DIR"
+  export CODEX_OPEN_LOG="$TMP/codex-open.log"
+  export CODEX_OPEN_BIN="$TMP/codex-open"
+  cat > "$CODEX_OPEN_BIN" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$CODEX_OPEN_LOG"
+exit 0
+EOF
+  chmod +x "$CODEX_OPEN_BIN"
+  : > "$CODEX_OPEN_LOG"
+}
+
+write_codex_ps() {
+  local dest="$1"
+  shift
+  python3 - "$dest" "$@" <<'PY'
+import sys
+dest = sys.argv[1]
+lines = []
+for row in sys.argv[2:]:
+    pid, ppid, comm, exe = row.split("|", 3)
+    lines.append("%s %s 00:01 %s\t%s\n" % (pid, ppid, comm, exe))
+open(dest, "w").write("".join(lines))
+PY
+  export CODEX_PS_FILE="$dest"
+}
+
+codex_decoys() {
+  local exe="$CODEX_APP_PATH/Contents/MacOS/ChatGPT"
+  write_codex_ps "$1" \
+    "9100|1|Codex (Service)|$CODEX_APP_PATH/Contents/Frameworks/Codex (Service)" \
+    "9101|1|Codex (Renderer)|$CODEX_APP_PATH/Contents/Frameworks/Codex (Renderer)" \
+    "9102|1|codex|/usr/local/bin/codex" \
+    "9103|1|node|/usr/local/bin/node" \
+    "9104|1|ChatGPT Classic|/Applications/ChatGPT Classic.app/Contents/MacOS/ChatGPT Classic" \
+    "9105|1|ChatGPT|$TMP/ChatGPT.localized/Contents/MacOS/ChatGPT"
+}
+
+write_codex_crash() {
+  python3 - "$1" <<'PY'
+import json, sys
+json.dump({
+    "app_name": "ChatGPT",
+    "bug_type": "309",
+    "bundleID": "com.openai.codex",
+    "procName": "ChatGPT",
+}, open(sys.argv[1], "w"))
+PY
+}
+
+seed_attempts() {
+  python3 - "$LATCH_DIR/grok-bot-restart-attempts.json" "$1" <<'PY'
+import json, os, sys, time
+path, kind = sys.argv[1], sys.argv[2]
+now = time.time()
+if kind == "one":
+    values = [now - 10]
+elif kind == "three":
+    values = [now - 30, now - 20, now - 10]
+else:
+    values = []
+json.dump({"v": 2, "attempts": {"grok": values}}, open(path, "w"))
+os.chmod(path, 0o600)
+PY
+}
+
+t_guard_helper_loss_allow() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  materialize "$FIX/post-ready" "$TMP/post" "$now"
+  export HEAL_SWAP_SUPPORT_ON_RELAUNCH="$TMP/post"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "status=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "reason=$(jget reason)"
+  grep -q "restart guard allow key=grok reason=helper_missing" "$HEAL_LOG" || die "guard did not allow"
+  python3 - "$HEAL_LOG" <<'PY' || die "guard allow not before heal start"
+import sys
+text = open(sys.argv[1]).read()
+a = text.find("restart guard allow")
+b = text.find("heal start")
+assert a != -1 and b != -1 and a < b, (a, b)
+PY
+  python3 - "$LATCH_DIR/grok-bot-restart-attempts.json" <<'PY' || die "ledger"
+import json, os, stat, sys
+path = sys.argv[1]
+mode = stat.S_IMODE(os.stat(path).st_mode)
+assert mode == 0o600, oct(mode)
+data = json.load(open(path))
+assert len(data["attempts"]["grok"]) == 1, data
+PY
+}
+
+t_guard_backoff() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  seed_attempts one
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" ]] || die "status=$(jget status)"
+  [[ "$(jget readiness)" == "retry_backoff" ]] || die "readiness=$(jget readiness)"
+  [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
+  grep -q "heal start" "$HEAL_LOG" && die "backoff relaunched" || true
+}
+
+t_guard_circuit_open() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  seed_attempts three
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" ]] || die "status=$(jget status)"
+  [[ "$(jget readiness)" == "circuit_open" ]] || die "readiness=$(jget readiness)"
+  grep -q "heal start" "$HEAL_LOG" && die "circuit relaunched" || true
+}
+
+t_guard_hold_wins() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  touch "$LATCH_DIR/grok-bot-restart.hold"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" ]] || die "process status=$(jget status)"
+  [[ "$(jget readiness)" == "maintenance_hold" ]] || die "process readiness=$(jget readiness)"
+  [[ "$(jget reason)" == "boot_outcome_starting" ]] || die "process reason=$(jget reason)"
+  grep -q "heal start" "$HEAL_LOG" && die "hold relaunched" || true
+
+  : > "$HEAL_LOG"
+  rm -f "$HEAL_STATE"
+  beacon_env
+  export HEAL_NOW_MS="$now"
+  touch "$LATCH_DIR/grok-bot-restart.hold"
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" ]] || die "beacon status=$(jget status)"
+  [[ "$(jget reason)" == "beacon_request" ]] || die "beacon reason=$(jget reason)"
+  [[ "$(jget readiness)" == "maintenance_hold" ]] || die "beacon readiness=$(jget readiness)"
+  grep -q "heal start" "$HEAL_LOG" && die "hold beacon relaunched" || true
+
+  : > "$HEAL_LOG"
+  rm -f "$HEAL_STATE" "$BEACON_URL"
+  unset BEACON_URL BEACON_MACHINE_ID BEACON_POLL_TOKEN_FILE || true
+  export HEAL_ON_HELPER_MISSING=1
+  export HEAL_NOW_MS="$now"
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  touch "$LATCH_DIR/grok-bot-restart.hold"
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" ]] || die "helper status=$(jget status)"
+  [[ "$(jget reason)" == "helper_missing" ]] || die "helper reason=$(jget reason)"
+  [[ "$(jget readiness)" == "maintenance_hold" ]] || die "helper readiness=$(jget readiness)"
+  grep -q "heal start" "$HEAL_LOG" && die "hold helper relaunched" || true
+
+  : > "$HEAL_LOG"
+  rm -f "$HEAL_STATE"
+  export HEAL_ON_HELPER_MISSING=0
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  export CODEX_REOPEN_POLICY=any_exit
+  codex_decoys "$TMP/codex-down.ps"
+  touch "$LATCH_DIR/grok-bot-restart.hold"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "codex-hold grok status=$(jget status)"
+  [[ "$(cget status)" == "maintenance_hold" ]] || die "codex readiness=$(cget status)"
+  [[ "$(cget action)" == "none" ]] || die "codex action=$(cget action)"
+  [[ ! -s "$CODEX_OPEN_LOG" ]] || die "codex opened under hold"
+  grep -q "codex reopen start" "$HEAL_LOG" && die "codex reopen started under hold" || true
+  grep -q "heal start" "$HEAL_LOG" && die "grok relaunched under hold" || true
+}
+
+t_guard_disable_wins() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.disable"
+  codex_on
+  export CODEX_REOPEN_POLICY=any_exit
+  codex_decoys "$TMP/codex-down.ps"
+  run_heal
+  [[ "$(jget status)" == "disabled" ]] || die "status=$(jget status)"
+  [[ "$(cget status)" == "disabled" ]] || die "codex status=$(cget status)"
+  [[ -f "$LATCH_DIR/grok-bot-local-exec-heal.request" ]] || die "disable consumed request"
+  [[ ! -s "$CODEX_OPEN_LOG" ]] || die "codex opened while disabled"
+  grep -q "heal start" "$HEAL_LOG" && die "disabled relaunched" || true
+  grep -q "codex reopen start" "$HEAL_LOG" && die "codex reopen while disabled" || true
+}
+
+t_guard_idle_opt_in() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_ON_HELPER_MISSING=1
+  export HELPER_IDLE_REQUIRED=1
+  stage_ps "$FIX/helpers/one-helper.ps"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_helper_missing "$now" 400000
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" ]] || die "status=$(jget status)"
+  [[ "$(jget readiness)" == "idle_authorization_required" ]] || die "readiness=$(jget readiness)"
+  grep -q "heal start" "$HEAL_LOG" && die "idle gate relaunched" || true
+  python3 - "$LATCH_DIR/grok-bot-restart-idle.json" <<'PY'
+import json, os, sys, time
+path = sys.argv[1]
+now = time.time()
+json.dump({"issuedAt": now - 1, "expiresAt": now + 60, "pid": 4242, "idleConfirmed": True}, open(path, "w"))
+os.chmod(path, 0o600)
+PY
+  materialize "$FIX/post-ready" "$TMP/post" "$now"
+  export HEAL_SWAP_SUPPORT_ON_RELAUNCH="$TMP/post"
+  : > "$HEAL_LOG"
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "leased status=$(jget status) readiness=$(jget readiness)"
+  [[ ! -f "$LATCH_DIR/grok-bot-restart-idle.json" ]] || die "lease was not consumed"
+  grep -q "heal start reason=helper_missing" "$HEAL_LOG" || die "leased heal did not start"
+}
+
+t_guard_missing_fails_closed() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  rm -f "$LATCH_DIR/bin/grok-bot-restart-guard.py"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" ]] || die "status=$(jget status)"
+  [[ "$(jget readiness)" == "restart_guard_missing" ]] || die "readiness=$(jget readiness)"
+  grep -q "heal start" "$HEAL_LOG" && die "missing guard relaunched" || true
+}
+
+t_codex_down_reopen() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"codex\":{\"pid\":9000,\"launchedAtMs\":1000,\"running\":true}}"
+  codex_decoys "$TMP/codex-down.ps"
+  write_codex_crash "$CODEX_CRASH_DIR/ChatGPT.ips"
+  write_codex_ps "$TMP/codex-up.ps" "9000|1|ChatGPT|$CODEX_APP_PATH/Contents/MacOS/ChatGPT"
+  export CODEX_PS_AFTER_FILE="$TMP/codex-up.ps"
+  export CODEX_PS_FILE="$TMP/codex-down.ps"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "grok status=$(jget status) reason=$(jget reason)"
+  [[ "$(cget status)" == "reopened" ]] || die "codex status=$(cget status) readiness=$(cget readiness)"
+  [[ "$(cget action)" == "reopen" ]] || die "codex action=$(cget action)"
+  [[ "$(cget pid)" == "9000" ]] || die "codex pid=$(cget pid)"
+  grep -q "codex reopen done" "$HEAL_LOG" || die "reopen did not finish"
+  grep -q "dry-run: skip codex open" "$HEAL_LOG" || die "dry-run did not skip open"
+  grep -q "heal start" "$HEAL_LOG" && die "healthy grok relaunched" || true
+  python3 - "$LATCH_DIR/grok-bot-restart-attempts.json" <<'PY' || die "codex ledger"
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert "grok" not in data["attempts"], data
+assert len(data["attempts"]["codex"]) == 1, data
+PY
+}
+
+t_codex_healthy_noop() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  write_codex_ps "$TMP/codex-up.ps" "9000|1|ChatGPT|$CODEX_APP_PATH/Contents/MacOS/ChatGPT"
+  write_codex_crash "$CODEX_CRASH_DIR/ChatGPT.ips"
+  export CODEX_WAL_FILE="$TMP/old-wal"
+  : > "$CODEX_WAL_FILE"
+  python3 - "$CODEX_WAL_FILE" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1, 1))
+PY
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "grok status=$(jget status)"
+  [[ "$(cget status)" == "up" ]] || die "codex status=$(cget status)"
+  [[ "$(cget action)" == "none" ]] || die "codex action=$(cget action)"
+  [[ "$(cget running)" == "True" ]] || die "running=$(cget running)"
+  grep -q "codex reopen start" "$HEAL_LOG" && die "healthy codex reopened" || true
+  [[ ! -s "$CODEX_OPEN_LOG" ]] || die "open called for a running codex"
+}
+
+t_codex_pause() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  export CODEX_REOPEN_POLICY=any_exit
+  codex_decoys "$TMP/codex-down.ps"
+  touch "$LATCH_DIR/codex.pause"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "grok status=$(jget status)"
+  [[ "$(cget status)" == "paused" ]] || die "codex status=$(cget status)"
+  [[ "$(cget action)" == "none" ]] || die "codex action=$(cget action)"
+  grep -q "codex reopen start" "$HEAL_LOG" && die "paused codex reopened" || true
+}
+
+t_codex_crash_only_without_report() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"codex\":{\"pid\":9000,\"launchedAtMs\":1000,\"running\":true}}"
+  codex_decoys "$TMP/codex-down.ps"
+  run_heal
+  [[ "$(cget status)" == "crash_required" ]] || die "status=$(cget status)"
+  [[ "$(cget action)" == "none" ]] || die "action=$(cget action)"
+  grep -q "codex reopen start" "$HEAL_LOG" && die "reopened without a report" || true
+  : > "$HEAL_LOG"
+  rm -f "$HEAL_STATE"
+  write_codex_crash "$CODEX_CRASH_DIR/ChatGPT.ips"
+  run_heal
+  [[ "$(cget status)" == "crash_required" ]] || die "unanchored status=$(cget status)"
+  grep -q "codex reopen start" "$HEAL_LOG" && die "reopened without a prior launch" || true
+}
+
+t_codex_never_killed() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export HEAL_DRY_RUN=0
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"codex\":{\"pid\":9000,\"launchedAtMs\":1000,\"running\":true}}"
+  codex_decoys "$TMP/codex-down.ps"
+  write_codex_crash "$CODEX_CRASH_DIR/ChatGPT.ips"
+  write_codex_ps "$TMP/codex-up.ps" "9000|1|ChatGPT|$CODEX_APP_PATH/Contents/MacOS/ChatGPT"
+  export CODEX_PS_AFTER_FILE="$TMP/codex-up.ps"
+  export CODEX_PS_FILE="$TMP/codex-down.ps"
+  mkdir -p "$TMP/bin"
+  local name
+  for name in kill pkill osascript open; do
+    cat > "$TMP/bin/$name" <<EOF
+#!/bin/sh
+printf '%s %s\n' "$name" "\$*" >> "$TMP/killed.log"
+exit 0
+EOF
+    chmod +x "$TMP/bin/$name"
+  done
+  : > "$TMP/killed.log"
+  export PATH="$TMP/bin:$PATH"
+  run_heal
+  [[ "$(cget status)" == "reopened" ]] || die "codex status=$(cget status) readiness=$(cget readiness)"
+  [[ "$(jget status)" == "ok" ]] || die "grok status=$(jget status)"
+  grep -q -- '-gb com.openai.codex' "$CODEX_OPEN_LOG" || die "open args=$(cat "$CODEX_OPEN_LOG")"
+  [[ ! -s "$TMP/killed.log" ]] || die "killed or quit: $(cat "$TMP/killed.log")"
+  grep -q "kill\|osascript\|pkill" "$HEAL_LOG" && die "log mentions kill" || true
+}
+
+t_codex_app_absent() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  export CODEX_WATCH=1
+  export CODEX_APP_PATH="$TMP/missing-ChatGPT.app"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "grok status=$(jget status)"
+  [[ "$(cget status)" == "app_absent" ]] || die "codex status=$(cget status)"
+  [[ "$(cget action)" == "none" ]] || die "action=$(cget action)"
+  rm -f "$HEAL_STATE"
+  unset CODEX_WATCH
+  export CODEX_APP_PATH="$TMP/also-missing-ChatGPT.app"
+  run_heal
+  [[ "$(cget status)" == "app_absent" ]] || die "default status=$(cget status)"
+  [[ "$(cget watched)" == "False" ]] || die "watched=$(cget watched)"
+}
+
+t_codex_any_exit() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  export CODEX_REOPEN_POLICY=any_exit
+  codex_decoys "$TMP/codex-down.ps"
+  write_codex_ps "$TMP/codex-up.ps" "9000|1|ChatGPT|$CODEX_APP_PATH/Contents/MacOS/ChatGPT"
+  export CODEX_PS_AFTER_FILE="$TMP/codex-up.ps"
+  export CODEX_PS_FILE="$TMP/codex-down.ps"
+  run_heal
+  [[ "$(cget status)" == "reopened" ]] || die "status=$(cget status)"
+  [[ "$(cget policy)" == "any_exit" ]] || die "policy=$(cget policy)"
+  grep -q "codex reopen start policy=any_exit" "$HEAL_LOG" || die "any_exit did not start"
+}
+
+t_codex_wal_stale() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  export CODEX_REOPEN_POLICY=any_exit
+  codex_decoys "$TMP/codex-down.ps"
+  write_codex_ps "$TMP/codex-up.ps" "9000|1|ChatGPT|$CODEX_APP_PATH/Contents/MacOS/ChatGPT"
+  export CODEX_PS_AFTER_FILE="$TMP/codex-up.ps"
+  export CODEX_PS_FILE="$TMP/codex-down.ps"
+  export CODEX_WAL_FILE="$TMP/stale-wal"
+  : > "$CODEX_WAL_FILE"
+  python3 - "$CODEX_WAL_FILE" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1, 1))
+PY
+  run_heal
+  [[ "$(cget status)" == "reopen_incomplete" ]] || die "status=$(cget status)"
+  [[ "$(cget readiness)" == "wal_stale" ]] || die "readiness=$(cget readiness)"
+  rm -f "$HEAL_STATE" "$LATCH_DIR/grok-bot-restart-attempts.json"
+  : > "$HEAL_LOG"
+  python3 - "$CODEX_WAL_FILE" <<'PY'
+import os, sys, time
+now = time.time()
+os.utime(sys.argv[1], (now, now))
+PY
+  run_heal
+  [[ "$(cget status)" == "reopened" ]] || die "fresh wal status=$(cget status) readiness=$(cget readiness)"
+}
+
+t_beacon_window_elapsed_honors() {
+  # Inside BEACON_RELAUNCH_WINDOW_SEC a second request is suppressed.
+  # At exactly the window (the comparison is strictly less-than) the request is honored.
+  beacon_env
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  export BEACON_RELAUNCH_WINDOW_SEC=3600
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  seed_state "{\"version\":2,\"status\":\"healed\",\"pid\":4242,\"lastHealAtMs\":$((now - 3599000)),\"lastBeaconHealAtMs\":$((now - 3599000))}"
+  run_heal
+  [[ "$(jget status)" == "beacon_suppressed" ]] || die "inside status=$(jget status)"
+  grep -q "heal start" "$HEAL_LOG" && die "inside window relaunched" || true
+  : > "$HEAL_LOG"
+  seed_state "{\"version\":2,\"status\":\"healed\",\"pid\":4242,\"lastHealAtMs\":$((now - 3600000)),\"lastBeaconHealAtMs\":$((now - 3600000))}"
+  run_heal
+  [[ "$(jget status)" == "healed" ]] || die "elapsed status=$(jget status) readiness=$(jget readiness)"
+  [[ "$(jget reason)" == "beacon_request" ]] || die "elapsed reason=$(jget reason)"
+  grep -q "heal start reason=beacon_request" "$HEAL_LOG" || die "elapsed window did not heal"
+}
+
+run_case T-guard-helper-loss-allow t_guard_helper_loss_allow
+run_case T-guard-backoff t_guard_backoff
+run_case T-guard-circuit-open t_guard_circuit_open
+run_case T-guard-hold-wins t_guard_hold_wins
+run_case T-guard-disable-wins t_guard_disable_wins
+run_case T-guard-idle-opt-in t_guard_idle_opt_in
+run_case T-guard-missing-fails-closed t_guard_missing_fails_closed
+run_case T-codex-down-reopen t_codex_down_reopen
+run_case T-codex-healthy-noop t_codex_healthy_noop
+run_case T-codex-pause t_codex_pause
+run_case T-codex-crash-only-without-report t_codex_crash_only_without_report
+run_case T-codex-never-killed t_codex_never_killed
+run_case T-codex-app-absent t_codex_app_absent
+run_case T-codex-any-exit t_codex_any_exit
+run_case T-codex-wal-stale t_codex_wal_stale
+run_case T-beacon-window-elapsed-honors t_beacon_window_elapsed_honors
 echo
 echo "passed=$PASS failed=$FAIL"
 if (( FAIL > 0 )); then

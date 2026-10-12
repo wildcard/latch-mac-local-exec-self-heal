@@ -1,7 +1,7 @@
 # Latch Mac local-exec self-heal — specification
 
-**Kit:** `mac-local-exec-self-heal` **1.5.0** (contract first written for 1.3.0, 2026-10-02)
-**Date:** 2026-10-07
+**Kit:** `mac-local-exec-self-heal` **1.6.0** (contract first written for 1.3.0, 2026-10-02)
+**Date:** 2026-10-12
 
 ## Contract
 
@@ -39,13 +39,13 @@ Both set `action=relaunch` so the cooldown clock starts.
 6. Heartbeat age > `HEARTBEAT_STALE_SEC` → `heartbeat_stale_<sec>s`
 7. `bootOutcome` present and not `ready` → `boot_outcome_<token>`. `<token>` keeps only letters, digits, `-`, and `_` (anything else becomes `_`) and is capped at 32 characters, so a raw outcome cannot land unbounded in the reason, the log, or a snapshot.
 8. If `HEAL_ON_STUCK_SESSION=1` (default): pid unchanged and `heartbeatAtMs` unchanged for ≥ `STUCK_SEC` (default 120) → `heartbeat_frozen`
-9. **Helper count below expected for ≥ `HELPER_MISSING_SEC` (1.5.0)** → `helper_missing`: relaunch when `HEAL_ON_HELPER_MISSING=1`; otherwise **log-only** (`status=observe`, `readiness=helper_missing_observe`, no relaunch)
+9. **Helper count below expected for ≥ `HELPER_MISSING_SEC` (1.5.0)** → `helper_missing`: relaunch when `HEAL_ON_HELPER_MISSING=1` (the 1.6.0 default, policy (a), no idle authorization); `=0` is **log-only** (`status=observe`, `readiness=helper_missing_observe`, no relaunch)
 10. Beacon heal-request (only polled when no local heal is needed, incl. in log-only `observe`) → `beacon_request` (bypasses cooldown)
 11. Else → `ok` / `healthy`
 
 Cooldown (`COOLDOWN_SEC`, default 300) suppresses another relaunch except `operator_request` and `beacon_request`. `helper_missing` **respects** cooldown.
 
-One relaunch per outage window: a second `beacon_request` inside `BEACON_RELAUNCH_WINDOW_SEC` → `beacon_suppressed`. For `helper_missing`, the expected count becomes a floor after a relaunch (or across a pid change while a missing interval is already open). A `beacon_request`, `operator_request`, `heartbeat_stale_*`, or `process_down` relaunch keeps that same floor when a helper-short interval is open; a relaunch while the count meets the expected level clears it. While the live count is still short the kit stays `helper_suppressed`, including after `HELPER_RELAUNCH_WINDOW_SEC` (3600), and it does not store the lower count. A later outage can relaunch only after the count has met that floor and the window has elapsed. Both suppressed states escalate instead of looping.
+One beacon relaunch per window: a second `beacon_request` inside `BEACON_RELAUNCH_WINDOW_SEC` → `beacon_suppressed`. The gate is elapsed time. At exactly `BEACON_RELAUNCH_WINDOW_SEC`, and after it, the next request is honored and still passes the restart guard. For `helper_missing`, the expected count becomes a floor after a relaunch (or across a pid change while a missing interval is already open). A `beacon_request`, `operator_request`, `heartbeat_stale_*`, or `process_down` relaunch keeps that same floor when a helper-short interval is open; a relaunch while the count meets the expected level clears it. While the live count is still short the kit stays `helper_suppressed`, including after `HELPER_RELAUNCH_WINDOW_SEC` (3600), and it does not store the lower count. A later outage can relaunch only after the count has met that floor and the window has elapsed. Both suppressed states escalate instead of looping.
 
 ## Helper-count observer (1.5.0, S-NEW-D helper-exit signature)
 
@@ -60,9 +60,9 @@ Each tick (main pid alive, `HELPER_CHECK=1`):
 - **Floor:** a `helper_missing` relaunch keeps the old expected count and points it at the new pid (`helperFloorPending`). The same carry happens on a `beacon_request`, `operator_request`, `heartbeat_stale_*`, or `process_down` relaunch when a helper-short interval is open (this tick, or the previous tick when this tick could not scan). A pid change while a missing interval is open, or while that floor is already pending, carries the effective expected count (`HELPER_EXPECTED` when set, otherwise the learned baseline). The floor clears only when the live count meets it. Until then the short count is not learned. That carry set is frozen for the log-only week: no further relaunch reasons, and socket counts do not gate a relaunch. Known limits, not changed this round: a carried floor does not expire on its own; a helper-scan exception is swallowed (the count becomes unknown and the error is not logged); baseline identity is the main pid alone, so a recycled pid can inherit the previous baseline; the ps shim reports bare comm names, matching `ps -o comm=`, and does not exercise a comm value that is a path.
 - **Missing clock:** on the same pid, `helperMissingSinceMs` starts the first tick count < expected and keeps running. An external pid change that carries the floor restarts the clock, so the new process gets a fresh `HELPER_MISSING_SEC` of grace. The clock clears when the count recovers. At ≥ `HELPER_MISSING_SEC` (300; values below 1 clamp to 1, non-numeric falls back to 300) → `helper_missing`.
 - **Unknown count** (`ps` failed / unreadable, or `HELPER_CHECK=0`) is never treated as missing.
-- **Sockets (observe-only):** only on ticks that write a snapshot. With `HELPER_SOCKET_CHECK=1` (default), `/usr/sbin/lsof -nP -a -p <helper pids> -iTCP -sTCP:ESTABLISHED -Fpn` (absolute path, not `PATH`); per helper, the count of established connections whose remote port is `HELPER_SOCKET_PORT` (443) → `helperSockets` `{pid: n}`. macOS `lsof` exits 1 with empty stderr when no pid has a matching socket; that is recorded as 0 for each helper pid. Exit 1 with stderr, or any other non-zero exit, leaves `helperSockets` null. Counts only: no addresses or hostnames. Never triggers a relaunch. The process table is `/bin/ps`, also absolute.
+- **Sockets (observe-only):** on every tick that has helper pids, not only snapshot ticks. With `HELPER_SOCKET_CHECK=1` (default), `/usr/sbin/lsof -nP -a -p <helper pids> -iTCP -sTCP:ESTABLISHED -Fpn` (absolute path, not `PATH`); per helper, the count of established connections whose remote port is `HELPER_SOCKET_PORT` (443) → `helperSockets` `{pid: n}`, also logged as `helper_sockets`. macOS `lsof` exits 1 with empty stderr when no pid has a matching socket; that is recorded as 0 for each helper pid. Exit 1 with stderr, or any other non-zero exit, leaves `helperSockets` null. Counts only: no addresses or hostnames. Never triggers a relaunch. The process table is `/bin/ps`, also absolute.
 
-Ship mode: **log-only** (`HEAL_ON_HELPER_MISSING=0`). Do not turn `=1` on until a live week shows the learned baseline is stable. What `=1` does, and what it refuses to do, is below. This is not a substitute for a product status file: [1.5.0/PRODUCT-STATUS-FILE.md](1.5.0/PRODUCT-STATUS-FILE.md).
+Ship mode: **relaunch** (`HEAL_ON_HELPER_MISSING=1`, policy (a)). `=0` remains log-only. `HELPER_IDLE_REQUIRED=1` opts `helper_missing` into the idle-authorization gate. What `=1` does, and what it refuses to do, is below. This is not a substitute for a product status file: [1.5.0/PRODUCT-STATUS-FILE.md](1.5.0/PRODUCT-STATUS-FILE.md). Every relaunch also passes the restart guard.
 
 ### What `HEAL_ON_HELPER_MISSING=1` does
 
@@ -76,13 +76,37 @@ Ship mode: **log-only** (`HEAL_ON_HELPER_MISSING=0`). Do not turn `=1` on until 
 - `.disable` wins. `operator_request` and `beacon_request` keep their existing precedence.
 - Only direct children of the main pid, comm prefix `Grok Bot Helper`, argv0 under the app path, subtype `node.mojom.NodeService`. GPU, renderer, `NetworkService`, and another app’s helpers are not counted.
 
-`=1` still misses a silent disconnect that does not drop a NodeService helper (the 2026-10-02 window). A kit installed in the middle of an outage can learn a short count after 600s of local health if `HELPER_EXPECTED` is unset; log-only is the default so that does not quit the app. `cloudConnectObservable` stays `false` either way.
+`=1` still misses a silent disconnect that does not drop a NodeService helper (the 2026-10-02 window). A kit installed in the middle of an outage can learn a short count after 600s of local health if `HELPER_EXPECTED` is unset. `cloudConnectObservable` stays `false` either way.
+
+## Restart guard (1.6.0)
+
+Before quit/`open` for Grok Bot, and before `open -gb` for Codex, the heal script runs `grok-bot-restart-guard.py` from the kit bin directory. A missing regular file is `restart_guard_missing` and blocks that Grok relaunch (`status=restart_blocked`). A symlink is not executed. The guard prints one token and does not launch processes.
+
+- **Ledger.** `grok-bot-restart-attempts.json`, mode `0600`, written with the new attempt before any quit or open. Shape `{"v":2,"attempts":{"grok":[...],"codex":[...]}}`. A legacy flat list is the grok key and is rewritten on the next allow. Keys match `[A-Za-z0-9_-]{1,32}`. Grok reasons share `grok`. Codex uses `codex`, so one key's cap does not spend the other.
+- **Cap.** At most three attempts per key in a rolling 3600s. Backoff after n recent attempts is `min(1800, 300 * 2^(n-1))` seconds. The next attempt is `circuit_open`.
+- **Hold.** `grok-bot-restart.hold`, including a symlink, returns `maintenance_hold` before the ledger is read and blocks every key.
+- **Fail closed.** Wrong owner, group/world mode bits, a non-regular file, empty or oversized JSON, or any element that is not a finite timestamp `>= 0` and `<= now` (including bool, string, NaN, infinity, negative, and future) is `restart_guard_error`. The file is not rewritten. Old timestamps outside the hour are valid and drop out of the window only.
+- **Idle opt-in.** `idle_required` is true only when the reason is `helper_missing` and `HELPER_IDLE_REQUIRED=1`. The lease is `grok-bot-restart-idle.json`, consumed on allow. Other reasons, including the default helper-loss path, do not read it.
+- A blocked Grok relaunch does not consume `grok-bot-local-exec-heal.request`. The escalate hint is `Restart suppressed: <result>.`
+
+## Codex keep-alive (1.6.0)
+
+`codex-watch.py` decides. The heal script is the only thing that may run `open -gb com.openai.codex`, and only after the guard returns `allow` for key `codex`. The kit never quits or kills Codex.
+
+- **Match.** Bundle directory `CODEX_APP_PATH` (default `/Applications/ChatGPT.app`). Main process comm exactly `ChatGPT` and executable exactly `$CODEX_APP_PATH/Contents/MacOS/ChatGPT`. Display name is not used. Helpers (`Codex (Service)`, `Codex (Renderer)`, `codex`, `node`), ChatGPT Classic, a `ChatGPT.localized` path, and a ChatGPT binary under Frameworks do not match.
+- **Watch.** `CODEX_WATCH` empty: on if the bundle directory exists, otherwise `app_absent` and no reopen. `0`: `unwatched`, no scan. `1`: watch, and `app_absent` when the directory is missing. Any other value: `watch_invalid`, no reopen. Evaluated after the disable check and before the Grok Bot.app-missing exit, so Codex still runs when Grok Bot.app is absent. The global disable file records Codex `disabled` and does not reopen. A missing `codex-watch.py` is `watch_missing` and does not abort the Grok tick.
+- **Policy.** `CODEX_REOPEN_POLICY=crash_only` (default, pinned in the plist template) reopens only when a regular, non-symlink `.ips` or `.crash` file contains bundle id `com.openai.codex` (not as a prefix of another id), a crash marker (`bug_type` 309 or `Crashed Thread:`), and a process name exactly `ChatGPT`, with mtime strictly newer than the last observed launch (`launchedAtMs`). No prior launch means no reopen (`crash_required`). `any_exit` reopens whenever the main process is absent. Any other policy is `policy_invalid`.
+- **Blocks.** `codex.pause` (including a symlink), the global disable file, and `grok-bot-restart.hold` (via the guard) block a reopen. A stall of a running main process is not a reopen.
+- **Readiness.** Main process up within `CODEX_READINESS_WAIT_SEC` (30). If `CODEX_WAL_FILE` is set and is a regular file, its mtime must be at least the open time minus 1s. A missing WAL file is optional success. A symlink WAL is not ready.
+- **State.** `last.json` field `codex`: `watched`, `appPresent`, `policy`, `bundleId`, `status`, `running`, `pid`, `launchedAtMs`, `action`, `readiness`, `lastReopenAtMs`. The crash-report file name is not stored.
+
+Set `CODEX_REOPEN_POLICY=any_exit` in the LaunchAgent environment to reopen on any exit. `crash_only` stays the default.
 
 ## Diagnostics snapshot (1.5.0)
 
 On every tick whose status is not `ok` or `disabled`, write `GrokBotLocalExecHeal-snap-<YYYYmmddTHHMMSS>-<ms>.json` next to `last.json` (or in `HEAL_SNAPSHOT_DIR`). The snapshot directory is mode `0700` (including when `HEAL_SNAPSHOT_DIR` is set) and each snapshot file is mode `0600`. Rate limit: one snapshot per status + reason class per `HEAL_SNAPSHOT_MIN_SEC` (900). The same class then waits twice as long each time, capped at 4 hours, so a long `observe` does not write every 15 minutes forever. An `ok` tick clears that backoff, so the next outage starts again at 900s. A changed class starts again at 900s. `heartbeat_stale_<seconds>s` is one class (`heartbeat_stale`), so the changing age does not defeat the limit. The stored reason text is unchanged. Pruned to the newest `HEAL_SNAPSHOT_KEEP` (20). When a tick is about to relaunch, a second file `...-before.json` (`phase=before_relaunch`) is written **before** quit/`open`, from the process tree captured at tick start, with the same modes.
 
-Contents: decision fields, helper fields, `processTree` = main pid + direct children as `{pid, ppid, etime, exe, type, subType}`, plus allowlisted `desktopStatus` (`version`, `pid`, `appVersion`, `startedAtMs`, `signedIn`) and `dune` (`pid`, `heartbeatAtMs`, `bootOutcome`, `mainFaultSeen`, numeric `childDeaths`). `exe` is exactly `Grok Bot`, `Grok Bot Helper`, or `Grok Bot Helper` with suffix `(GPU)`, `(Renderer)`, `(Plugin)`, or `(Alerts)`; anything else is `other`. `type` is `utility`, `renderer`, `gpu-process`, `zygote`, or `other`. `subType` is kept only for processes inside the app path and only when it is one of the five service names (`NodeService`, `NetworkService`, `StorageService`, `AudioService`, `VideoCaptureService`); any other subtype is stored as null. The helper count still matches the raw subtype. Top-level `bootOutcome` goes through the same token filter as `dune.bootOutcome` (no spaces, slashes, or `@`). **No argv**, no user-data-dir path, no installId, no token. App logs are not tailed (no documented secret-free predicate). Socket diagnostics run only on these ticks and are counts on `HELPER_SOCKET_PORT` only. `last.json` records `lastSnapshot` (file name) plus the helper summary fields.
+Contents: decision fields, helper fields, `processTree` = main pid + direct children as `{pid, ppid, etime, exe, type, subType}`, plus allowlisted `desktopStatus` (`version`, `pid`, `appVersion`, `startedAtMs`, `signedIn`) and `dune` (`pid`, `heartbeatAtMs`, `bootOutcome`, `mainFaultSeen`, numeric `childDeaths`). `exe` is exactly `Grok Bot`, `Grok Bot Helper`, or `Grok Bot Helper` with suffix `(GPU)`, `(Renderer)`, `(Plugin)`, or `(Alerts)`; anything else is `other`. `type` is `utility`, `renderer`, `gpu-process`, `zygote`, or `other`. `subType` is kept only for processes inside the app path and only when it is one of the five service names (`NodeService`, `NetworkService`, `StorageService`, `AudioService`, `VideoCaptureService`); any other subtype is stored as null. The helper count still matches the raw subtype. Top-level `bootOutcome` goes through the same token filter as `dune.bootOutcome` (no spaces, slashes, or `@`). **No argv**, no user-data-dir path, no installId, no token. App logs are not tailed (no documented secret-free predicate). Socket counts are taken on every tick that has helper pids, including these snapshot ticks, and are counts on `HELPER_SOCKET_PORT` only. `last.json` records `lastSnapshot` (file name) plus the helper summary fields.
 
 A heartbeat whose timestamp **keeps moving**, with age still under 180s, is **not** `heartbeat_frozen`. That pattern is S-NEW-D when the cloud link is nevertheless down. See the incident note.
 
@@ -92,7 +116,7 @@ Written every tick that gets the lock.
 
 | Field | Meaning |
 |---|---|
-| `status` | `ok`, `observe` (1.5.0 log-only `helper_missing`), `disabled`, `error`, `cooldown`, `healed`, `heal_incomplete`, `heal_failed`, `beacon_suppressed`, `helper_suppressed` |
+| `status` | `ok`, `observe` (log-only `helper_missing` when `HEAL_ON_HELPER_MISSING=0`), `disabled`, `error`, `cooldown`, `healed`, `heal_incomplete`, `heal_failed`, `beacon_suppressed`, `helper_suppressed`, `restart_blocked` (1.6.0 guard refusal) |
 | `reason` | Why this tick decided what it decided |
 | `action` | `none` or `relaunch` |
 | `pid`, `heartbeatAgeSec`, `heartbeatAtMs`, `bootOutcome` | Local signals |
@@ -103,7 +127,8 @@ Written every tick that gets the lock.
 | `lastHealAtMs`, `lastHealIso` | Last relaunch attempt |
 | `lastBeaconHealAtMs` | Last `beacon_request` relaunch (1.4.0) |
 | `cloudConnectObservable` | Always `false` |
-| `kitVersion` | `1.5.0` |
+| `kitVersion` | `1.6.0` |
+| `codex` | 1.6.0 keep-alive object. See Codex keep-alive. Absent only when the watcher did not run |
 | `helperCount`, `helperPids` | NodeService helpers under the main pid at tick start (`null` = not scanned / unknown) |
 | `helperExpected`, `helperExpectedSource` | Expected count and where it came from (`config` / `learned` / `null`) |
 | `helperBaseline`, `helperBaselinePid`, `helperStableCount`, `helperStableSinceMs`, `helperHealthySamples` | Baseline bookkeeping. `helperStableCount` is the running minimum of positive counts in the open window; `helperStableSinceMs` is when that window started; `helperHealthySamples` is how many healthy ticks are in that window (learning needs at least 3). Learned once as that minimum. Never raised or lowered after that. `.disable`, `app_missing`, and a failed scan file keep the previous values |
@@ -111,7 +136,7 @@ Written every tick that gets the lock.
 | `helperFloorPending` | Old expected count is a floor until the live count meets it |
 | `helperNoneSeen` | Scan succeeded and no NodeService helper is a child of this pid. Does not relaunch. Its hint does not replace the long-ok S-NEW-D hint |
 | `helperMissingSinceMs`, `helperMissingForSec` | Missing clock |
-| `helperSockets` | `{pid: established count to HELPER_SOCKET_PORT}` on snapshot ticks. Exit 1 with empty stderr is 0 per pid. `null` if not scanned, if stderr is non-empty, or if the exit is any other non-zero |
+| `helperSockets` | `{pid: established count to HELPER_SOCKET_PORT}` on every tick that has helper pids. Exit 1 with empty stderr is 0 per pid. `null` if not scanned, if stderr is non-empty, or if the exit is any other non-zero. Not a heal trigger |
 | `helperCheck`, `healOnHelperMissing` | Effective switches |
 | `lastHelperHealAtMs` | Last `helper_missing` relaunch |
 | `lastSnapshot`, `lastSnapshotAtMs`, `lastSnapshotStatus`, `lastSnapshotReason` | Newest diagnostics snapshot (file name only) |
@@ -131,7 +156,8 @@ The long-ok hint tells a person reading the file: local signals look healthy, cl
 | S7 post-relaunch readiness | Yes | No premature `healed` |
 | S8 sleep / lid | No | Do not claim healed |
 | S9 / S-NEW-D cloud-only disconnect | Beacon / helper | Beacon POST by an agent ([agent loop](1.5.0/AGENT-LOOP.md)); human restart or request file |
-| S-NEW-D helper-exit signature (1.5.0) | Log-only by default | `observe` / `helper_missing` + snapshot. `HEAL_ON_HELPER_MISSING=1` relaunches once, then stays `helper_suppressed` while the count is still short |
+| S-NEW-D helper-exit signature (1.5.0) | Yes, by default in 1.6.0 | `helper_missing` relaunches once, then stays `helper_suppressed` while the count is still short. `HEAL_ON_HELPER_MISSING=0` stays `observe` |
+| Codex main process absent (1.6.0) | Yes, when the app is installed and watch is on | `crash_only` reopens only with a matching crash report newer than the last observed launch. `any_exit` reopens on absence. Pause, disable, and hold win. A running Codex is never killed |
 | S10 intentional quit | Yes, by design | Relaunch unless disabled |
 | Frozen timestamp | Yes | `heartbeat_frozen` |
 | Operator request | Yes | `operator_request` |
@@ -147,8 +173,10 @@ The agent runbook in [1.5.0/AGENT-LOOP.md](1.5.0/AGENT-LOOP.md) is not kit behav
 
 ## Tests
 
-- `tests/run-tests.sh` — fixture / dry-run. Default. Must not quit a live Grok Bot.
-- `tests/live-process-down.sh` — macOS only, `LIVE=1`, quits the app and waits for `healed` + `readiness=ready`. Not part of the default harness.
+- `tests/run-tests.sh` — fixture / dry-run. Default. Must not quit a live Grok Bot. `passed=110 failed=0` on Linux bash and on compiled bash 3.2.57.
+- `python3 -m unittest` — restart guard, Codex decision, and `beacon-heal-request` (35 tests). Fake token files only.
+- `cd worker-beacon && npm test` — Worker unit tests (15).
+- `tests/live-process-down.sh` — macOS only, `LIVE=1`, quits the app and waits for `healed` + `readiness=ready`. Not part of the default harness. A 1.6.0 live prove, including Codex, needs a maintenance window and is not part of this change.
 
 ## Out of scope
 

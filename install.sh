@@ -47,6 +47,8 @@ fi
 
 mkdir -p "$BIN_DIR" "$LAUNCH_DIR" "$LOG_DIR" "$HOME_DIR/Library/Application Support/Latch"
 install -m 755 "$SCRIPT_SRC" "$SCRIPT_DST"
+install -m 755 "$ROOT/grok-bot-restart-guard.py" "$BIN_DIR/grok-bot-restart-guard.py"
+install -m 755 "$ROOT/codex-watch.py" "$BIN_DIR/codex-watch.py"
 
 # Keep operator-set EnvironmentVariables across reinstalls.
 # Operator tunables (HEAL_*, *SEC, BEACON_*, custom keys) win over template defaults.
@@ -171,13 +173,18 @@ echo "  script: $SCRIPT_DST"
 echo "  plist:  $PLIST_DST"
 echo "  logs:   $LOG_DIR/GrokBotLocalExecHeal.log"
 echo "  last:   $LOG_DIR/GrokBotLocalExecHeal-last.json"
+echo "  guard:  $BIN_DIR/grok-bot-restart-guard.py"
 echo "  disable: touch \"$HOME_DIR/Library/Application Support/Latch/grok-bot-local-exec-heal.disable\""
 echo "  force:   touch \"$HOME_DIR/Library/Application Support/Latch/grok-bot-local-exec-heal.request\""
+echo "  codex pause: touch \"$HOME_DIR/Library/Application Support/Latch/codex.pause\""
+echo "  maintenance hold: touch \"$HOME_DIR/Library/Application Support/Latch/grok-bot-restart.hold\""
 echo
 # dry-run once (real signals on this Mac; may relaunch if the app looks down).
 # Drop test hooks so a shell that exported them cannot feed canned ps/lsof
 # into the post-install tick. env -u is the macOS / bash 3.2 form.
-env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN "$SCRIPT_DST" || true
+env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN \
+  -u CODEX_PS_FILE -u CODEX_PS_AFTER_FILE -u CODEX_OPEN_BIN -u CODEX_CRASH_DIR -u CODEX_WAL_FILE \
+  "$SCRIPT_DST" || true
 if [[ -f "$LOG_DIR/GrokBotLocalExecHeal-last.json" ]]; then
   echo "Dry-run state:"
   cat "$LOG_DIR/GrokBotLocalExecHeal-last.json"
