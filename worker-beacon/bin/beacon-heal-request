@@ -16,7 +16,6 @@ import urllib.request
 import uuid
 
 
-DEFAULT_TOKEN_FILE = "/home/box/.secrets/latch-worker-beacon/WRITER_TOKEN"
 MACHINE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 EXP_TTL_SEC = 60
 
@@ -96,7 +95,9 @@ def main(argv=None):
     url = os.environ.get("BEACON_URL", "")
     if not https_url(url):
         return fail("BEACON_URL must be https")
-    token_path = os.environ.get("BEACON_WRITER_TOKEN_FILE") or DEFAULT_TOKEN_FILE
+    token_path = os.environ.get("BEACON_WRITER_TOKEN_FILE", "").strip()
+    if not token_path:
+        return fail("BEACON_WRITER_TOKEN_FILE is required")
     try:
         token = read_token(token_path)
     except ValueError as exc:

@@ -67,6 +67,16 @@ class BeaconHealRequestTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertNotIn(TOKEN, proc.stdout + proc.stderr)
 
+    def test_token_file_env_required(self):
+        proc = run(["--dry-run", "machine-1"], extra_env={"BEACON_WRITER_TOKEN_FILE": ""})
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("BEACON_WRITER_TOKEN_FILE is required", proc.stderr)
+        blob = proc.stdout + proc.stderr
+        self.assertNotIn(TOKEN, blob)
+        self.assertNotIn("/home/", blob)
+        script = CMD.read_text()
+        self.assertNotIn("/home/", script)
+
 
 if __name__ == "__main__":
     unittest.main()

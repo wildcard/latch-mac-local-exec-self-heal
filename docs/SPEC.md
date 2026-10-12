@@ -174,7 +174,7 @@ The agent runbook in [1.5.0/AGENT-LOOP.md](1.5.0/AGENT-LOOP.md) is not kit behav
 ## Tests
 
 - `tests/run-tests.sh` — fixture / dry-run. Default. Must not quit a live Grok Bot. `passed=110 failed=0` on Linux bash and on compiled bash 3.2.57.
-- `python3 -m unittest` — restart guard, Codex decision, and `beacon-heal-request` (35 tests). Fake token files only.
+- `python3 -m unittest` — restart guard, Codex decision, and `beacon-heal-request` (36 tests). Fake token files only. `BEACON_WRITER_TOKEN_FILE` is required and has no default path.
 - `cd worker-beacon && npm test` — Worker unit tests (15).
 - `tests/live-process-down.sh` — macOS only, `LIVE=1`, quits the app and waits for `healed` + `readiness=ready`. Not part of the default harness. A 1.6.0 live prove, including Codex, needs a maintenance window and is not part of this change.
 

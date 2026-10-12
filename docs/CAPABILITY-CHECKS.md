@@ -64,11 +64,11 @@ Status: **PASS** = hermetic test passes; **LIVE** = also proven on a real Mac; *
 ## Run the checks
 
 - [ ] `./tests/run-tests.sh` -> `passed=110 failed=0` (macOS and Linux). Hermetic: no live app, no launchd, no network. Canned `ps`/`lsof`, and `HELPER_PS_BIN`, only when `HEAL_TEST_MODE=1`.
-- [ ] `python3 -m unittest` -> 35 tests (guard, Codex, `beacon-heal-request`).
+- [ ] `python3 -m unittest` -> 36 tests (guard, Codex, `beacon-heal-request`).
 - [ ] `cd worker-beacon && npm test` -> 15 of 15 pass.
 - [ ] `bash -n grok-bot-local-exec-heal.sh install.sh tests/run-tests.sh`
 
-**1.6.0 (PR branch `feat/kit-1.6.0-keepalive`):** Linux `passed=110 failed=0` on GNU bash and on compiled bash 3.2.57. `python3 -m unittest` is 35. Worker `npm test` is 15. `HEAL_ON_HELPER_MISSING` defaults to 1. The plist pins `CODEX_REOPEN_POLICY=crash_only` and does not pin `HEAL_ON_HELPER_MISSING`. Live prove is not done.
+**1.6.0 (PR branch `feat/kit-1.6.0-keepalive`):** Linux `passed=110 failed=0` on GNU bash and on compiled bash 3.2.57. `python3 -m unittest` is 36. Worker `npm test` is 15. `HEAL_ON_HELPER_MISSING` defaults to 1. The plist pins `CODEX_REOPEN_POLICY=crash_only` and does not pin `HEAL_ON_HELPER_MISSING`. Live prove is not done.
 
 **1.5.0 (PR branch `feat/kit-1.5.0-helper-missing`):** Linux `passed=94 failed=0` on GNU bash 5.2.21 and on compiled bash 3.2.57. macOS at `a1a18d6` is `passed=94 failed=0` on `/bin/bash` 3.2.57. Learn-once is the minimum positive count over a window that needs at least three healthy samples. An unhealthy tick does not seed that minimum. A lower count lowers it only after two consecutive healthy ticks. The tick that would complete the window does not learn while its count is still below that minimum. A learned baseline of 1 with `HELPER_EXPECTED` unset sets `helperBaselineLow` and a log-only hint. An ok tick clears snapshot backoff. The plist template does not pin `HEAL_ON_HELPER_MISSING`. `bash -n` is clean on both bashes.
 
