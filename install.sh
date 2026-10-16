@@ -187,7 +187,6 @@ if [[ "$BOOT_OK" != "1" ]]; then
   exit 5
 fi
 launchctl enable "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
-launchctl kickstart -k "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
 
 echo "Installed Latch local-exec self-heal ${LABEL} version $(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
 echo "  script: $SCRIPT_DST"
@@ -200,13 +199,7 @@ echo "  force:   touch \"$HOME_DIR/Library/Application Support/Latch/grok-bot-lo
 echo "  codex pause: touch \"$HOME_DIR/Library/Application Support/Latch/codex.pause\""
 echo "  maintenance hold: touch \"$HOME_DIR/Library/Application Support/Latch/grok-bot-restart.hold\""
 echo
-# dry-run once (real signals on this Mac; may relaunch if the app looks down).
-# Drop test hooks so a shell that exported them cannot feed canned ps/lsof
-# into the post-install tick. env -u is the macOS / bash 3.2 form.
-env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN \
-  -u CODEX_PS_FILE -u CODEX_PS_AFTER_FILE -u CODEX_OPEN_BIN -u CODEX_CRASH_DIR -u CODEX_WAL_FILE \
-  RECOVERY_MODE="$INSTALL_RECOVERY_MODE" HEAL_ON_HELPER_MISSING="$INSTALL_HELPER_HEAL" "$SCRIPT_DST" || true
-if [[ -f "$LOG_DIR/GrokBotLocalExecHeal-last.json" ]]; then
-  echo "Dry-run state:"
-  cat "$LOG_DIR/GrokBotLocalExecHeal-last.json"
-fi
+# RunAtLoad is the only immediate tick. Do not kickstart or invoke the script
+# again here: a second tick would shorten the first-observation barrier.
+echo "LaunchAgent registered. RunAtLoad owns the initial observation tick."
+echo "Default reinstall disables all automatic app recovery; active installation requires an explicit owner policy."

@@ -2,6 +2,8 @@
 
 ## 1.6.0 — 2026-10-12
 
+- Follow-up review: normalize macOS report fractions for Python 3.9 using synthetic fixtures; use a single argv-free Codex process snapshot; remove installer kickstart/direct extra tick; stop incomplete gentle quits without force killing or duplicate open; expose mode/clock/guard status; verify owned 0600 legacy ledger caps; minimize identifying metadata in current review docs. Earlier commits retain removed metadata; no history rewrite or repository-wide privacy clearance is claimed.
+
 Keep-alive for a recent outage: helper loss relaunches by default, a shared restart guard caps every restart, and Codex reopens only on a matching crash unless the operator opts into any-exit.
 
 - **Stage 0 safety revision, 2026-10-16.** `RECOVERY_MODE=observe` and `HEAL_ON_HELPER_MISSING=0` are pinned by the installer and default in the script. Every default reinstall demotes legacy active/helper settings. Active recovery requires `INSTALL_RECOVERY_MODE=active`, with `INSTALL_HELPER_HEAL=1` as a separate helper opt-in. Stage 0 does not poll the beacon or spend restart attempts. A PID-bound idle lease is not evidence of all-lanes idleness. First active tick, invalid observation state and long/wake-like gaps block recovery; authoritative wake detection remains unproved. Frozen heartbeat/socket hints alone never authorize recovery. See [migration and remaining gates](docs/1.6.0/STAGE0-2026-10-16.md).

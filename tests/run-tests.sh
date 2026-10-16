@@ -2378,35 +2378,34 @@ t_install_fresh() {
 }
 
 t_install_post_tick_drops_test_hooks() {
-  # The post-install tick must not inherit canned ps/lsof hooks from the shell
-  # that ran install.sh. INSTALL_SKIP_LAUNCHD returns before that tick, so this
-  # checks the installer source and runs the same env -u command against a stub.
-  local src="$ROOT/install.sh"
-  grep -q 'env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN' "$src" \
-    || die "post-install tick does not clear test hooks"
-  grep -q -- '-u CODEX_PS_FILE -u CODEX_PS_AFTER_FILE -u CODEX_OPEN_BIN -u CODEX_CRASH_DIR -u CODEX_WAL_FILE' "$src" \
-    || die "post-install tick does not clear codex test hooks"
-  local stub="$TMP/post-tick.sh"
-  cat > "$stub" <<'EOF'
-#!/bin/bash
-printf 'mode=%s\nps=%s\nlsof=%s\npsbin=%s\nlsofbin=%s\ncodexps=%s\n' \
-  "${HEAL_TEST_MODE-unset}" "${HELPER_PS_FILE-unset}" "${HELPER_LSOF_FILE-unset}" \
-  "${HELPER_PS_BIN-unset}" "${HELPER_LSOF_BIN-unset}" "${CODEX_PS_FILE-unset}"
-EOF
-  chmod +x "$stub"
-  local out
-  out="$(HEAL_TEST_MODE=1 HELPER_PS_FILE=/tmp/ps-hook HELPER_LSOF_FILE=/tmp/lsof-hook \
-    HELPER_PS_BIN=/tmp/ps-bin HELPER_LSOF_BIN=/tmp/lsof-bin \
-    CODEX_PS_FILE=/tmp/codex-ps CODEX_PS_AFTER_FILE=/tmp/codex-after CODEX_OPEN_BIN=/tmp/codex-open \
-    CODEX_CRASH_DIR=/tmp/crashes CODEX_WAL_FILE=/tmp/wal \
-    env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN \
-    -u CODEX_PS_FILE -u CODEX_PS_AFTER_FILE -u CODEX_OPEN_BIN -u CODEX_CRASH_DIR -u CODEX_WAL_FILE "$stub")"
-  [[ "$out" == *"mode=unset"* ]] || die "HEAL_TEST_MODE survived: $out"
-  [[ "$out" == *"ps=unset"* ]] || die "HELPER_PS_FILE survived: $out"
-  [[ "$out" == *"lsof=unset"* ]] || die "HELPER_LSOF_FILE survived: $out"
-  [[ "$out" == *"psbin=unset"* ]] || die "HELPER_PS_BIN survived: $out"
-  [[ "$out" == *"lsofbin=unset"* ]] || die "HELPER_LSOF_BIN survived: $out"
-  [[ "$out" == *"codexps=unset"* ]] || die "CODEX_PS_FILE survived: $out"
+  # Full installer flow uses temporary HOME and a fake launchctl. Nothing is
+  # registered with real launchd; an unexpected app command fails this case.
+  local home="$TMP/no-second-tick-home"
+  local shims="$TMP/install-shims"
+  mkdir -p "$home" "$shims"
+  export INSTALL_CALL_LOG="$TMP/install-calls"
+  cat > "$shims/launchctl" <<'EOFSTUB'
+#!/bin/sh
+printf 'launchctl %s\n' "$*" >> "$INSTALL_CALL_LOG"
+exit 0
+EOFSTUB
+  printf '#!/bin/sh\nexit 0\n' > "$shims/sleep"
+  local name
+  for name in open osascript pkill; do
+    cat > "$shims/$name" <<'EOFSTUB'
+#!/bin/sh
+printf 'unexpected-app-command\n' >> "$INSTALL_CALL_LOG"
+exit 1
+EOFSTUB
+  done
+  chmod +x "$shims/launchctl" "$shims/sleep" "$shims/open" "$shims/osascript" "$shims/pkill"
+  HOME="$home" PATH="$shims:$PATH" INSTALL_SKIP_LAUNCHD=0 INSTALL_RECOVERY_MODE=active INSTALL_HELPER_HEAL=1 bash "$ROOT/install.sh" > "$TMP/install-output" 2>&1 || die "stubbed installer failed"
+  [[ -s "$INSTALL_CALL_LOG" ]] || die "launchctl stub not called"
+  grep -q 'bootstrap' "$INSTALL_CALL_LOG" || die "no registration attempt"
+  grep -q 'kickstart\|unexpected-app-command' "$INSTALL_CALL_LOG" && die "extra tick or app operation" || true
+  [[ ! -e "$home/Library/Application Support/Latch/grok-bot-observation-clock.json" ]] || die "installer sampled continuity directly"
+  [[ ! -e "$home/Library/Logs/GrokBotLocalExecHeal-last.json" ]] || die "installer executed an extra tick"
+  grep -q 'RunAtLoad owns' "$TMP/install-output" || die "initial observation ownership unclear"
 }
 
 run_case T-healthy t_healthy
@@ -2502,7 +2501,7 @@ run_case T-snapshot-backoff-resets-on-ok t_snapshot_backoff_resets_on_ok
 run_case T-install-template-helper-defaults t_install_template_helper_defaults
 run_case T-install-helper-missing-opt-in-survives t_install_helper_missing_opt_in_survives
 run_case T-install-preserves-helper-env t_install_preserves_helper_env
-run_case T-install-post-tick-drops-test-hooks t_install_post_tick_drops_test_hooks
+run_case T-install-no-second-tick t_install_post_tick_drops_test_hooks
 run_case T-oct7-helper-drop-replay t_oct7_helper_drop_replay
 
 cget() {
@@ -2620,6 +2619,7 @@ t_guard_backoff() {
   run_heal
   [[ "$(jget status)" == "restart_blocked" ]] || die "status=$(jget status)"
   [[ "$(jget readiness)" == "retry_backoff" ]] || die "readiness=$(jget readiness)"
+  [[ "$(jget restartGuardResult)" == "retry_backoff" ]] || die "ledger block not visible"
   [[ "$(jget action)" == "none" ]] || die "action=$(jget action)"
   grep -q "heal start" "$HEAL_LOG" && die "backoff relaunched" || true
 }
@@ -3003,7 +3003,7 @@ t_invalid_opt_in_writes_nothing() {
     die "helper opt-in without active was accepted"
   fi
   [[ ! -e "$home" ]] || die "invalid option wrote files"
-  grep -q 'RECOVERY_MODE="$INSTALL_RECOVERY_MODE" HEAL_ON_HELPER_MISSING="$INSTALL_HELPER_HEAL" "$SCRIPT_DST"' "$ROOT/install.sh" || die "post-install tick lost installed policy"
+  grep -q 'RunAtLoad owns' "$ROOT/install.sh" || die "installer tick ownership undocumented"
 }
 
 t_bad_heartbeat_is_not_stale_authorization() {
@@ -3026,6 +3026,53 @@ PYHB
     [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "$kind heartbeat spent budget"
   done
 }
+
+t_quit_timeout_stops_without_force_or_duplicate_open() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  export HEAL_DRY_RUN=0 QUIT_WAIT_SEC=1
+  local shims="$TMP/quit-shims"
+  mkdir -p "$shims"
+  export QUIT_CALL_LOG="$TMP/quit-calls"
+  printf '#!/bin/sh\nexit 0\n' > "$shims/pgrep"
+  printf '#!/bin/sh\nexit 0\n' > "$shims/sleep"
+  cat > "$shims/osascript" <<'EOFQUIT'
+#!/bin/sh
+printf 'quit-attempt\n' >> "$QUIT_CALL_LOG"
+exit 0
+EOFQUIT
+  local name
+  for name in open pkill; do
+    cat > "$shims/$name" <<'EOFQUIT'
+#!/bin/sh
+printf 'unsafe-followup\n' >> "$QUIT_CALL_LOG"
+exit 1
+EOFQUIT
+  done
+  chmod +x "$shims/pgrep" "$shims/sleep" "$shims/osascript" "$shims/open" "$shims/pkill"
+  export PATH="$shims:$PATH"
+  run_heal
+  [[ "$(jget status)" == "heal_incomplete" && "$(jget readiness)" == "quit_timeout" ]] || die "quit timeout not visible"
+  [[ "$(jget action)" == "quit_attempt" ]] || die "quit action not recorded"
+  grep -q 'quit-attempt' "$QUIT_CALL_LOG" || die "gentle quit not exercised"
+  grep -q 'unsafe-followup' "$QUIT_CALL_LOG" && die "force kill or duplicate open attempted" || true
+  [[ -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "attempt budget lost"
+}
+
+t_clock_status_visible_on_healthy_tick() {
+  unset HEAL_TEST_CONTINUOUS
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget status)" == "ok" ]] || die "healthy status changed"
+  [[ "$(jget recoveryMode)" == "active" ]] || die "mode invisible"
+  [[ "$(jget observationStatus)" == "observation_required" ]] || die "clock block invisible"
+  [[ "$(jget restartGuardResult)" == "not_evaluated" ]] || die "unrequested restart misreported"
+}
+
+run_case T-quit-timeout-no-force t_quit_timeout_stops_without_force_or_duplicate_open
+run_case T-clock-status-visible t_clock_status_visible_on_healthy_tick
 
 run_case T-invalid-opt-in-writes-nothing t_invalid_opt_in_writes_nothing
 run_case T-bad-heartbeat-no-authorization t_bad_heartbeat_is_not_stale_authorization

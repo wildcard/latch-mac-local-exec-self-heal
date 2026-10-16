@@ -76,6 +76,26 @@ def find_main(rows, app_path):
     return found[0]
 
 
+def parse_report_timestamp(value):
+    """Normalize Apple's space/+HHMM timestamps and 1..9 fractional digits.
+
+    Python 3.9 fromisoformat accepts only 3 or 6 fractional digits; report
+    producers commonly emit four. Nanoseconds are conservatively truncated.
+    """
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?\s*(Z|[+-]\d{2}:?\d{2})", value)
+    if not match:
+        return None
+    date, clock, fraction, offset = match.groups()
+    offset = "+00:00" if offset == "Z" else re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", offset)
+    fraction = "." + fraction.ljust(6, "0")[:6] if fraction else ""
+    try:
+        return datetime.fromisoformat(date + "T" + clock + fraction + offset)
+    except ValueError:
+        return None
+
+
 def crash_identity(text):
     """Read primary report fields, never bundle/name tokens in loaded images."""
     try:
@@ -102,11 +122,8 @@ def crash_identity(text):
         timestamp = field("Date/Time")
         crash = field("Crashed Thread") is not None
     try:
-        # Legacy .crash uses a space before +HHMM; Apple's Python 3.9
-        # requires +HH:MM. IPS timestamps may use either offset spelling.
-        timestamp = re.sub(r"\s*([+-]\d{2})(\d{2})$", r"\1:\2", timestamp)
-        when = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        if when.tzinfo is None:
+        when = parse_report_timestamp(timestamp)
+        if when is None:
             return None
         return bundle, name, crash, when.timestamp()
     except (ValueError, TypeError, AttributeError, OverflowError):
@@ -190,39 +207,30 @@ def read_rows(ps_file, test_mode):
 
 
 def live_rows():
+    # macOS comm is the full executable path. One snapshot avoids joining
+    # a main-process row to a later, potentially different command snapshot.
+    # No process argv is collected or retained here.
     try:
-        comm = subprocess.run(
+        snapshot = subprocess.run(
             ["/bin/ps", "-axww", "-o", "pid=,ppid=,etime=,comm="],
-            capture_output=True, text=True, timeout=10,
-        )
-        cmd = subprocess.run(
-            ["/bin/ps", "-axww", "-o", "pid=,command="],
             capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if comm.returncode != 0 or cmd.returncode != 0 or not comm.stdout.strip() or not cmd.stdout.strip():
+    if snapshot.returncode != 0 or not snapshot.stdout.strip():
         return None
-    commands = {}
-    for line in cmd.stdout.splitlines():
-        match = re.match(r"\s*(\d+)\s+(.*)$", line)
-        if match:
-            commands[int(match.group(1))] = match.group(2).strip()
     rows = []
-    for line in comm.stdout.splitlines():
+    for line in snapshot.stdout.splitlines():
         match = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
         if not match:
             continue
-        pid = int(match.group(1))
-        command = commands.get(pid, "")
-        exe = command.split(" ")[0] if command else ""
-        rows.append({
-            "pid": pid,
-            "ppid": int(match.group(2)),
-            "comm": match.group(4).strip(),
-            "exe": exe,
-            "command": command,
-        })
+        comm = match.group(4).strip()
+        if comm == MAIN_COMM:
+            # An unsupported short-name format cannot prove bundle identity.
+            return None
+        rows.append({"pid": int(match.group(1)), "ppid": int(match.group(2)),
+                     "comm": comm, "exe": comm if comm.startswith("/") else "",
+                     "command": ""})
     return rows or None
 
 

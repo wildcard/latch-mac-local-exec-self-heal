@@ -40,6 +40,33 @@ def cfg(**kwargs):
 
 
 class MatchTests(unittest.TestCase):
+    def test_macos_report_fractional_timestamps_on_python39(self):
+        from datetime import datetime, timezone
+        expected = datetime(2026, 1, 1, 16, 17, 28, 451200, tzinfo=timezone.utc).timestamp()
+        for value in ("2026-01-01 09:17:28.4512 -0700", "2026-01-01T16:17:28.451200Z",
+                      "2026-01-01 09:17:28.451200999 -0700"):
+            self.assertEqual(codex.parse_report_timestamp(value).timestamp(), expected)
+        for fraction in ("1", "12", "123", "1234", "12345", "123456", "123456789"):
+            self.assertIsNotNone(codex.parse_report_timestamp("2026-01-01 09:17:28." + fraction + " -0700"))
+        for invalid in (None, "2026-01-01 09:17:28.4512", "2026-13-01 09:17:28.4512 -0700", "NaN"):
+            self.assertIsNone(codex.parse_report_timestamp(invalid))
+        for name in ("main.ips", "main.crash"):
+            fixture = ROOT / "tests/fixtures/codex-crash" / name
+            self.assertEqual(codex.crash_identity(fixture.read_text())[3], expected)
+            self.assertTrue(codex.crash_report_matches(str(fixture), codex.BUNDLE_ID, expected - 1))
+            self.assertFalse(codex.crash_report_matches(str(fixture), codex.BUNDLE_ID, expected + 1))
+
+    def test_live_scan_is_one_snapshot_without_argv_join(self):
+        snapshot = SimpleNamespace(returncode=0, stdout="9000 1 10:00 " + EXE + "\n")
+        with patch.object(codex.subprocess, "run", return_value=snapshot) as run:
+            rows = codex.live_rows()
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn("command=", " ".join(run.call_args.args[0]))
+        self.assertEqual(rows[0]["command"], "")
+        self.assertEqual(codex.evaluate(cfg(rows=rows))["status"], "up")
+        with patch.object(codex.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="9000 1 10:00 ChatGPT\n")):
+            self.assertIsNone(codex.live_rows())
+
     def test_main_process_matches_bundle_path(self):
         self.assertTrue(codex.is_main_process(row(9000, "ChatGPT", EXE), APP))
 

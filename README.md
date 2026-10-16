@@ -31,8 +31,8 @@ an intentional safety migration. Editing this draft does not change an installed
 
 Only after a separately approved maintenance window may an operator invoke
 `INSTALL_RECOVERY_MODE=active`; helper recovery additionally requires
-`INSTALL_HELPER_HEAL=1`. These invocation-only options control both the installed
-plist and the immediate post-install tick. Invalid combinations fail before any
+`INSTALL_HELPER_HEAL=1`. These invocation-only options control the installed plist. RunAtLoad owns the
+single initial tick; the installer does not kickstart or invoke the script again. Invalid combinations fail before any
 files are written. A subsequent default reinstall returns to observe-only.
 No command in this paragraph has been executed on the live Mac.
 
@@ -166,7 +166,7 @@ launchctl print gui/$(id -u)/com.latch.grok-bot-local-exec-heal | head -40
 cat ~/Library/Logs/GrokBotLocalExecHeal-last.json
 ```
 
-`last.json` (schema version 2) includes `status`, `reason`, `action`, `pid`, `heartbeatAgeSec`, `heartbeatAtMs`, `bootOutcome`, `readiness`, `escalateHint`, `lastHealAtMs`, frozen/ok-streak clocks, and `cloudConnectObservable: false`. 1.5.0 adds `helperCount`, `helperPids`, `helperExpected` (+ source and a baseline learned once per pid), `helperHealthySamples`, `helperFloorPending`, `helperNoneSeen`, `helperBaselineLow` (learned baseline is 1 and `HELPER_EXPECTED` is unset; log-only hint), `helperMissingSinceMs`, `helperSockets`, `lastHelperHealAtMs`, and `lastSnapshot`. 1.6.0 adds a `codex` object (`watched`, `appPresent`, `policy`, `bundleId`, `status`, `running`, `pid`, `launchedAtMs`, `action`, `readiness`, `lastReopenAtMs`). Crash-report file names are not stored. On any tick whose status is not `ok`/`disabled`, a `GrokBotLocalExecHeal-snap-*.json` (mode `0600`, directory `0700`) is written next to it: decision, helper fields, and main/child comm names. No argv. Rate-limited and pruned.
+`last.json` (schema version 2) includes `status`, `reason`, `action`, `pid`, `heartbeatAgeSec`, `heartbeatAtMs`, `bootOutcome`, `readiness`, `escalateHint`, `lastHealAtMs`, frozen/ok-streak clocks, and `cloudConnectObservable: false`. 1.5.0 adds `helperCount`, `helperPids`, `helperExpected` (+ source and a baseline learned once per pid), `helperHealthySamples`, `helperFloorPending`, `helperNoneSeen`, `helperBaselineLow` (learned baseline is 1 and `HELPER_EXPECTED` is unset; log-only hint), `helperMissingSinceMs`, `helperSockets`, `lastHelperHealAtMs`, and `lastSnapshot`. 1.6.0 adds a `codex` object (`watched`, `appPresent`, `policy`, `bundleId`, `status`, `running`, `pid`, `launchedAtMs`, `action`, `readiness`, `lastReopenAtMs`). Top-level `recoveryMode`, `observationStatus` and `restartGuardResult` expose recovery policy and guard visibility separately from health. Crash-report file names are not stored. On any tick whose status is not `ok`/`disabled`, a `GrokBotLocalExecHeal-snap-*.json` (mode `0600`, directory `0700`) is written next to it: decision, helper fields, and main/child comm names. No argv. Rate-limited and pruned.
 
 ### Helper observer tunables (1.5.0)
 
@@ -200,7 +200,7 @@ cat ~/Library/Logs/GrokBotLocalExecHeal-last.json
 | `CODEX_PAUSE` | `~/Library/Application Support/Latch/codex.pause` | Present, including as a symlink, blocks a reopen |
 | `CODEX_READINESS_WAIT_SEC` | `30` | How long to wait for the main process after `open`. Optional freshness: if `CODEX_WAL_FILE` is set and is a regular file, its mtime must be at least the open time. A symlink is not fresh |
 
-The process matcher accepts both the short name and macOS full-path `comm`, with an exact bundle executable match. A failed process scan is `process_scan_error` and cannot authorize a reopen. The watcher reads the resolved state path even when `HEAL_STATE` is not exported. Crash reports must have the primary bundle/process identity and an explicit event timestamp after the last observed launch; file modification time alone is insufficient. JSON IPS reports up to 4 MiB and legacy text `.crash` reports are supported; malformed, undated, oversized, or future reports fail closed.
+The process matcher accepts both the short name and macOS full-path `comm`, with an exact bundle executable match. Live observation uses one `comm` snapshot without collecting argv; it does not join separate process snapshots. A failed process scan is `process_scan_error` and cannot authorize a reopen. The watcher reads the resolved state path even when `HEAL_STATE` is not exported. Crash reports must have the primary bundle/process identity and an explicit event timestamp after the last observed launch; file modification time alone is insufficient. JSON IPS reports up to 4 MiB and legacy text `.crash` reports are supported; malformed, undated, oversized, or future reports fail closed.
 
 The global disable file skips Codex as well as Grok Bot. The maintenance hold blocks a reopen through the same guard. Codex is evaluated even when Grok Bot.app is missing. The kit never quits or kills Codex, including on a stall. Set `CODEX_REOPEN_POLICY=any_exit` in the LaunchAgent environment to reopen on any exit. `crash_only` stays the plist default.
 
@@ -254,3 +254,11 @@ If you quit Grok Bot on purpose, this agent brings it back unless the disable fi
 Set all three in the LaunchAgent environment to enable one outbound `POST /v1/poll` per tick: `BEACON_URL`, `BEACON_MACHINE_ID`, `BEACON_POLL_TOKEN_FILE` (a file outside this repo holding the poller bearer token). Worker source: [`worker-beacon/`](worker-beacon/). A pending request relaunches like `operator_request` with reason `beacon_request` and bypasses the 300s cooldown. `.disable` wins and skips the poll, so the request stays queued until its `exp`. A second beacon request inside `BEACON_RELAUNCH_WINDOW_SEC` (3600) of a beacon relaunch is not honored (`beacon_suppressed`, escalate). The comparison is elapsed seconds, not a permanent latch: once that window has elapsed, including at exactly 3600s, the next request is honored and still has to pass the restart guard. Worker unreachable or malformed reply: no-op. The Worker is deployed and live on the operator's personal Cloudflare at https://<operator-worker-host>. Writer and poller tokens are Worker secrets and live in a token file outside this repo, never in git. Prove C passed on the beacon path ([`docs/1.4.0/PROVE-C-2026-10-05.md`](docs/1.4.0/PROVE-C-2026-10-05.md)); Prove D is still open.
 
 `worker-beacon/bin/beacon-heal-request` posts one heal request from the operator worker host. It is not copied onto the Mac. `BEACON_WRITER_TOKEN_FILE` is required and has no default path; point it at `<path-to-writer-token-file>`. The command refuses a non-https `BEACON_URL` and all HTTP redirects (so the writer credential stays at the configured endpoint), and prints only the HTTP status and the request id. `--dry-run` prints `dry-run` and the request id and does not connect. The token is never printed.
+
+A gentle Grok quit that does not finish stops recovery: `status=heal_incomplete`,
+`readiness=quit_timeout`, `action=quit_attempt`. The attempt remains budgeted. There
+is no forced-kill fallback and no duplicate `open` after that timeout.
+
+Apple report timestamps with one through nine fractional digits and either
+`+HHMM` or `+HH:MM` offsets are normalized for Python 3.9. The committed IPS and
+text crash fixtures are synthetic and contain no copied private report data.

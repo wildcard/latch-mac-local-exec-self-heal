@@ -732,7 +732,7 @@ elif helper_hit:
         "helper_missing (log-only): Grok Bot is up and its heartbeat is fresh, but only %d of %d "
         "%s helpers have been present for %ds (2026-10-07 helper-exit shape). "
         "This tick does not relaunch. cloud ListMachines.connected is not visible from the Mac. "
-        "A beacon heal-request or grok-bot-local-exec-heal.request still relaunches."
+        "Requests are recovery candidates only in explicitly active mode and remain subject to continuity and restart guards."
         % (helper_count, expected, h_subtype_value, int(missing_for))
     )
 else:
@@ -1051,6 +1051,7 @@ write_state() {
   W_FROZEN="${FROZEN_SINCE:-}" W_OK="${OK_SINCE:-}" W_UNCHANGED="${UNCHANGED_FOR_SEC:-}" \
   W_KIT="$KIT_VERSION" W_APP="$APP_PATH" W_SCAN="${SCAN_FILE:-}" \
   W_CODEX="${CODEX_DECISION:-}" \
+  W_MODE="$RECOVERY_MODE" W_OBSERVATION="${OBSERVATION_RESULT:-not_checked}" W_GUARD="${GROK_GUARD_RESULT:-not_evaluated}" \
   W_SNAP_DIR="${HEAL_SNAPSHOT_DIR:-}" W_SNAP_MIN="$HEAL_SNAPSHOT_MIN_SEC" W_SNAP_KEEP="$HEAL_SNAPSHOT_KEEP" \
     "$PYTHON" - "$STATE" <<'PY'
 import glob, json, os, sys, time
@@ -1119,6 +1120,14 @@ data = {
     "okStreakSinceMs": pint(ok_since),
     "app": app,
     "cloudConnectObservable": False,
+    "recoveryMode": "active" if os.environ.get("W_MODE") == "active" else "observe",
+    "observationStatus": os.environ.get("W_OBSERVATION") if os.environ.get("W_OBSERVATION") in
+        ("continuous", "observation_required", "observation_error") else "not_checked",
+    "restartGuardResult": os.environ.get("W_GUARD") if os.environ.get("W_GUARD") in
+        ("allow", "observation_only", "observation_required", "observation_error", "maintenance_hold",
+         "retry_backoff", "circuit_open", "restart_guard_missing", "restart_guard_error",
+         "idle_authorization_required", "idle_authorization_expired_or_invalid",
+         "idle_authorization_invalid", "idle_authorization_pid_changed") else "not_evaluated",
 }
 if action == "relaunch":
     data["lastHealAtMs"] = now_ms
@@ -1689,6 +1698,7 @@ if [[ "${NEED_HEAL}" != "1" ]]; then
 fi
 
 restart_guard_check "$REASON" "${PID:-}" "grok"
+GROK_GUARD_RESULT="$GUARD_RESULT"
 if [[ "$GUARD_RESULT" != "allow" ]]; then
   log "restart blocked guard=$GUARD_RESULT reason=$REASON pid=${PID:-}"
   READINESS="$GUARD_RESULT"
@@ -1714,20 +1724,21 @@ if [[ "$HEAL_DRY_RUN" == "1" ]]; then
     log "dry-run: support dir swapped for readiness probe"
   fi
 else
-  if pgrep -f "/Applications/Grok Bot.app/Contents/MacOS/Grok Bot" >/dev/null 2>&1; then
+  if pgrep -f '^/Applications/Grok Bot[.]app/Contents/MacOS/Grok Bot( |$)' >/dev/null 2>&1; then
     log "gentle quit via AppleScript"
     osascript -e 'tell application "Grok Bot" to quit' >/dev/null 2>&1 || true
     for _i in $(seq 1 "$QUIT_WAIT_SEC"); do
-      if ! pgrep -f "/Applications/Grok Bot.app/Contents/MacOS/Grok Bot" >/dev/null 2>&1; then
+      if ! pgrep -f '^/Applications/Grok Bot[.]app/Contents/MacOS/Grok Bot( |$)' >/dev/null 2>&1; then
         break
       fi
       sleep 1
     done
-    if pgrep -f "/Applications/Grok Bot.app/Contents/MacOS/Grok Bot" >/dev/null 2>&1; then
-      log "force kill remaining Grok Bot main/helpers"
-      pkill -f "/Applications/Grok Bot.app/Contents/MacOS/Grok Bot" 2>/dev/null || true
-      pkill -f "/Applications/Grok Bot.app/Contents/Frameworks/Grok Bot Helper" 2>/dev/null || true
-      sleep 2
+    if pgrep -f '^/Applications/Grok Bot[.]app/Contents/MacOS/Grok Bot( |$)' >/dev/null 2>&1; then
+      log "quit incomplete: stop without force kill or duplicate open"
+      READINESS="quit_timeout"
+      ESCALATE_HINT="Gentle quit did not complete. Attempt budget retained; stop for owner review."
+      write_state "heal_incomplete" "$ORIG_REASON" "quit_attempt"
+      exit 0
     fi
   fi
 

@@ -47,6 +47,18 @@ class GateTests(unittest.TestCase):
             self.assertEqual(proc.stdout.strip(), "observation_error")
             self.assertEqual(path.read_text(), "{}")
 
+    def test_owned_0600_legacy_attempts_remain_capped_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grok-bot-restart-attempts.json"
+            now = time.time()
+            path.write_text(json.dumps({"attempts": [now - 60, now - 50, now - 40]}))
+            path.chmod(0o600)
+            before = path.read_bytes()
+            result = run_guard(directory, 42, reason="process_down")
+            self.assertEqual(result.stdout.strip(), "circuit_open")
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_active_work_is_held_even_with_valid_idle_file(self):
         self.assertEqual(guard.decision(1000, 42, self.lease, [], held=True), "maintenance_hold")
 
