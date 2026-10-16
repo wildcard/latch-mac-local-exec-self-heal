@@ -7,6 +7,7 @@ process by bundle executable path and pid. Display names and helper comm names
 do not count.
 """
 import json
+from datetime import datetime
 import os
 import re
 import stat
@@ -26,7 +27,7 @@ HELPER_COMMS = {
     "ChatGPT.localized",
 }
 CRASH_SUFFIXES = (".ips", ".crash")
-CRASH_READ_MAX = 65536
+CRASH_READ_MAX = 4 * 1024 * 1024
 
 
 def main_executable(app_path):
@@ -61,7 +62,7 @@ def is_main_process(row, app_path):
     Helper comm names, ChatGPT Classic, and a ChatGPT.localized path do not match.
     """
     comm = row.get("comm")
-    if comm in HELPER_COMMS or comm != MAIN_COMM:
+    if comm not in (MAIN_COMM, main_executable(app_path)):
         return False
     expected = main_executable(app_path)
     return row.get("exe") == expected
@@ -75,22 +76,41 @@ def find_main(rows, app_path):
     return found[0]
 
 
-def _bundle_token(text, bundle_id):
-    return re.search(r"(?<![\w.-])" + re.escape(bundle_id) + r"(?![\w.-])", text) is not None
-
-
-def _crash_marker(text):
-    if re.search(r'"bug_type"\s*:\s*"?309"?', text):
-        return True
-    if "Crashed Thread:" in text:
-        return True
-    return False
-
-
-def _main_proc_names(text):
-    names = re.findall(r'"(?:procName|app_name|appName)"\s*:\s*"([^"]*)"', text)
-    names += re.findall(r"^Process:\s+(.+?)\s+\[", text, re.M)
-    return names
+def crash_identity(text):
+    """Read primary report fields, never bundle/name tokens in loaded images."""
+    try:
+        decoder = json.JSONDecoder()
+        header, end = decoder.raw_decode(text.lstrip())
+        if not isinstance(header, dict):
+            return None
+        rest = text.lstrip()[end:].strip()
+        body = json.loads(rest) if rest else header
+        if not isinstance(body, dict):
+            return None
+        bundle = body.get("bundleInfo", {}).get("CFBundleIdentifier") if isinstance(body.get("bundleInfo", {}), dict) else None
+        bundle = bundle or header.get("bundleID")
+        name = body.get("procName") or header.get("app_name")
+        timestamp = body.get("captureTime") or header.get("timestamp")
+        crash = str(header.get("bug_type")) == "309"
+    except (ValueError, TypeError):
+        def field(label):
+            match = re.search(r"^" + re.escape(label) + r":\s*(.+)$", text, re.M)
+            return match.group(1).strip() if match else None
+        bundle = field("Identifier")
+        process = field("Process") or ""
+        name = re.sub(r"\s+\[\d+\]$", "", process)
+        timestamp = field("Date/Time")
+        crash = field("Crashed Thread") is not None
+    try:
+        # Legacy .crash uses a space before +HHMM; Apple's Python 3.9
+        # requires +HH:MM. IPS timestamps may use either offset spelling.
+        timestamp = re.sub(r"\s*([+-]\d{2})(\d{2})$", r"\1:\2", timestamp)
+        when = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            return None
+        return bundle, name, crash, when.timestamp()
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return None
 
 
 def crash_report_matches(path, bundle_id, launched_at_s):
@@ -113,12 +133,12 @@ def crash_report_matches(path, bundle_id, launched_at_s):
             text = handle.read(CRASH_READ_MAX)
     except OSError:
         return False
-    if not _bundle_token(text, bundle_id):
+    identity = crash_identity(text)
+    if identity is None:
         return False
-    if not _crash_marker(text):
-        return False
-    names = _main_proc_names(text)
-    return MAIN_COMM in names
+    bundle, name, crashed, occurred = identity
+    return (bundle == bundle_id and name == MAIN_COMM and crashed
+            and float(launched_at_s) < occurred <= time.time())
 
 
 def stat_is_reg(mode):
@@ -160,12 +180,12 @@ def load_prev_codex(state_path):
 def read_rows(ps_file, test_mode):
     if test_mode:
         if not ps_file or not os.path.isfile(ps_file) or os.path.islink(ps_file):
-            return []
+            return None
         try:
             with open(ps_file) as handle:
                 return parse_ps_text(handle.read())
         except OSError:
-            return []
+            return None
     return live_rows()
 
 
@@ -180,9 +200,9 @@ def live_rows():
             capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return []
-    if comm.returncode != 0 or cmd.returncode != 0:
-        return []
+        return None
+    if comm.returncode != 0 or cmd.returncode != 0 or not comm.stdout.strip() or not cmd.stdout.strip():
+        return None
     commands = {}
     for line in cmd.stdout.splitlines():
         match = re.match(r"\s*(\d+)\s+(.*)$", line)
@@ -249,10 +269,17 @@ def evaluate(cfg):
 
     prev = cfg.get("prev") if isinstance(cfg.get("prev"), dict) else {}
     now_ms = int(cfg["now_ms"])
-    rows = cfg.get("rows") or []
+    rows = cfg.get("rows")
+    if rows is None:
+        result = _base_result(policy, True, True)
+        result.update(status="process_scan_error", readiness="process_scan_error",
+                      launchedAtMs=_int_or_none(prev.get("launchedAtMs")))
+        return result
     main = find_main(rows, app_path)
     pause = bool(cfg.get("paused"))
     launched = _int_or_none(prev.get("launchedAtMs"))
+    if launched is not None and not 0 < launched <= now_ms:
+        launched = None
     result = _base_result(policy, True, True)
     result["launchedAtMs"] = launched
     result["lastReopenAtMs"] = _int_or_none(prev.get("lastReopenAtMs"))
@@ -313,6 +340,9 @@ def wal_fresh(wal_path, opened_ms):
 def apply_probe(current, rows, app_path, opened_ms, wal_path):
     """Update current after an open attempt. Returns (ready, object)."""
     data = dict(current)
+    if rows is None:
+        data.update(status="reopen_incomplete", readiness="process_scan_error")
+        return False, data
     main = find_main(rows, app_path)
     data["action"] = "reopen"
     data["lastReopenAtMs"] = int(opened_ms)

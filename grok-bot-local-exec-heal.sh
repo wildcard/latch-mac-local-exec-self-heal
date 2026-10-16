@@ -1432,7 +1432,7 @@ codex_tick() {
     codex_note "watch_missing"
     return 0
   fi
-  if ! "$PYTHON" "$watch_py" decide "$LATCH_DIR" "$CODEX_DECISION"; then
+  if ! HEAL_STATE="$STATE" "$PYTHON" "$watch_py" decide "$LATCH_DIR" "$CODEX_DECISION"; then
     codex_note "watch_error"
     return 0
   fi

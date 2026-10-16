@@ -2556,6 +2556,7 @@ import json, sys
 json.dump({
     "app_name": "ChatGPT",
     "bug_type": "309",
+    "timestamp": "2026-01-01T00:00:00+00:00",
     "bundleID": "com.openai.codex",
     "procName": "ChatGPT",
 }, open(sys.argv[1], "w"))

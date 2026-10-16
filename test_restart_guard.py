@@ -163,6 +163,17 @@ class GateTests(unittest.TestCase):
                     self.assertEqual(proc.stdout.strip(), "restart_guard_error", name)
                     self.assertEqual(path.read_text(), before)
 
+    def test_existing_ledger_without_attempts_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grok-bot-restart-attempts.json"
+            for payload in ('{"v": 2}\n', 'null\n'):
+                path.write_text(payload)
+                path.chmod(0o600)
+                before = path.read_bytes()
+                proc = run_guard(directory, 42, reason="process_down")
+                self.assertEqual(proc.stdout.strip(), "restart_guard_error")
+                self.assertEqual(path.read_bytes(), before)
+
     def test_symlink_ledger_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

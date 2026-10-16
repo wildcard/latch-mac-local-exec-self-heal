@@ -154,8 +154,12 @@ def main(argv=None):
         state = private_json(state_path, optional=True)
         if state is not None and not isinstance(state, dict):
             raise ValueError("malformed state")
-        if state is None or "attempts" not in state:
+        if state is None:
+            if state_path.exists():
+                raise ValueError("null state")
             attempts_raw = None
+        elif "attempts" not in state:
+            raise ValueError("missing attempts")
         else:
             attempts_raw = state["attempts"]
             if attempts_raw is None:
