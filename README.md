@@ -17,6 +17,8 @@ It does not need a cloud shell. Once the desktop link is gone, a remote agent ca
 
 ## Stage 0 and migration
 
+See the [owner installation decision, read-only ledger precheck and policy/budget-preserving rollback](docs/1.6.0/INSTALLATION-POLICY.md) before any installation.
+
 This draft now defaults to **observe-only**: `RECOVERY_MODE=observe` and
 `HEAL_ON_HELPER_MISSING=0` are pinned in the plist and are also script defaults.
 Every restart path, including Codex, operator request and beacon recovery, passes
