@@ -15,6 +15,16 @@ SCRIPT_DST="$BIN_DIR/grok-bot-local-exec-heal.sh"
 PLIST_DST="$LAUNCH_DIR/${LABEL}.plist"
 VERSION_FILE="$ROOT/VERSION"
 
+# Stage 0 intentionally demotes old active/helper settings on every default install.
+INSTALL_RECOVERY_MODE="${INSTALL_RECOVERY_MODE:-observe}"
+INSTALL_HELPER_HEAL="${INSTALL_HELPER_HEAL:-0}"
+if [[ "$INSTALL_RECOVERY_MODE" != "observe" && "$INSTALL_RECOVERY_MODE" != "active" ]] || \
+   [[ "$INSTALL_HELPER_HEAL" != "0" && "$INSTALL_HELPER_HEAL" != "1" ]] || \
+   [[ "$INSTALL_HELPER_HEAL" == "1" && "$INSTALL_RECOVERY_MODE" != "active" ]]; then
+  echo "Invalid recovery opt-in: use INSTALL_RECOVERY_MODE=observe|active and INSTALL_HELPER_HEAL=0|1 (helper heal requires active)." >&2
+  exit 2
+fi
+
 # INSTALL_SKIP_LAUNCHD=1 is for hermetic tests only: write files, touch no LaunchAgent, run no heal.
 # Also skips the Darwin-only gate so merge/plist logic can be exercised on Linux CI.
 SKIP_LAUNCHD=0
@@ -51,8 +61,8 @@ install -m 755 "$ROOT/grok-bot-restart-guard.py" "$BIN_DIR/grok-bot-restart-guar
 install -m 755 "$ROOT/codex-watch.py" "$BIN_DIR/codex-watch.py"
 
 # Keep operator-set EnvironmentVariables across reinstalls.
-# Operator tunables (HEAL_*, *SEC, BEACON_*, custom keys) win over template defaults.
-# Kit-owned PATH comes from the template unless INSTALL_RESET_ENV=1 (full wipe to template).
+# Operator tunables (*SEC, BEACON_*, custom keys) win except Stage 0 recovery gates.
+# Kit-owned PATH and Stage 0 RECOVERY_MODE/HEAL_ON_HELPER_MISSING come from this install unless INSTALL_RESET_ENV=1 (full wipe to template).
 # HEAL_TEST_MODE is never preserved and is removed if an existing plist has it.
 # Merge into a temp file in LAUNCH_DIR, lint, then mv into place. Merge failure leaves
 # the existing plist untouched and exits non-zero before any launchctl bootstrap.
@@ -82,7 +92,7 @@ if os.environ.get("INSTALL_TEST_MERGE_FAIL") == "1":
 # the existing plist are preserved over template defaults: documented tunables
 # (HEAL_CURSOR, *SEC, HEAL_ON_STUCK_SESSION, BEACON_*), plus any custom operator keys.
 # Set INSTALL_RESET_ENV=1 to wipe back to the template.
-KIT_OWNED = {"PATH"}
+KIT_OWNED = {"PATH", "RECOVERY_MODE", "HEAL_ON_HELPER_MISSING"}
 DROP = {"HEAL_TEST_MODE"}
 
 old_path, new_path = sys.argv[1], sys.argv[2]
@@ -116,6 +126,17 @@ PY
     exit 1
   fi
 fi
+
+# Explicit invocation-only opt-ins; old plist values cannot silently enable recovery.
+"$PYTHON" - "$NEW_PLIST" "$INSTALL_RECOVERY_MODE" "$INSTALL_HELPER_HEAL" <<'PYOPT'
+import plistlib, sys
+path, mode, helper = sys.argv[1:]
+with open(path, "rb") as handle:
+    data = plistlib.load(handle)
+data["EnvironmentVariables"].update(RECOVERY_MODE=mode, HEAL_ON_HELPER_MISSING=helper)
+with open(path, "wb") as handle:
+    plistlib.dump(data, handle)
+PYOPT
 
 # Lint before replace (plutil on macOS; python load elsewhere / when plutil missing).
 if command -v plutil >/dev/null 2>&1; then
@@ -184,7 +205,7 @@ echo
 # into the post-install tick. env -u is the macOS / bash 3.2 form.
 env -u HEAL_TEST_MODE -u HELPER_PS_FILE -u HELPER_LSOF_FILE -u HELPER_PS_BIN -u HELPER_LSOF_BIN \
   -u CODEX_PS_FILE -u CODEX_PS_AFTER_FILE -u CODEX_OPEN_BIN -u CODEX_CRASH_DIR -u CODEX_WAL_FILE \
-  "$SCRIPT_DST" || true
+  RECOVERY_MODE="$INSTALL_RECOVERY_MODE" HEAL_ON_HELPER_MISSING="$INSTALL_HELPER_HEAL" "$SCRIPT_DST" || true
 if [[ -f "$LOG_DIR/GrokBotLocalExecHeal-last.json" ]]; then
   echo "Dry-run state:"
   cat "$LOG_DIR/GrokBotLocalExecHeal-last.json"

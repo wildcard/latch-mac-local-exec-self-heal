@@ -46,6 +46,8 @@ setup_env() {
   # T-helper-ps-hook-requires-test-mode calls the real ps binary and must not
   # see the fixture. HEAL_TEST_MODE is what makes the canned hooks live.
   export HEAL_TEST_MODE=1
+  export HEAL_TEST_CONTINUOUS=1
+  export RECOVERY_MODE=active
   export HELPER_CHECK=1
   export HEAL_ON_HELPER_MISSING=0
   export HELPER_MISSING_SEC=300
@@ -54,7 +56,8 @@ setup_env() {
   export HELPER_SOCKET_CHECK=1
   export HELPER_LSOF_FILE="$FIX/helpers/sockets.lsof"
   unset HELPER_EXPECTED HEAL_SNAPSHOT_DIR HEAL_SNAPSHOT_KEEP HEAL_SNAPSHOT_MIN_SEC || true
-  # Production default is HEAL_ON_HELPER_MISSING=1. The suite pins 0 so the
+  # Stage 0 defaults to observation; this suite explicitly simulates active policy.
+  # Production HEAL_ON_HELPER_MISSING=0. The suite pins 0 so the
   # log-only cases stay explicit. Codex stays off unless a case opts in.
   export CODEX_WATCH=0
   export CODEX_REOPEN_POLICY=crash_only
@@ -253,9 +256,10 @@ t_heartbeat_frozen() {
   local since=$((now - 130000))
   seed_state "{\"version\":2,\"status\":\"ok\",\"pid\":4242,\"heartbeatAtMs\":$hb,\"heartbeatFrozenSinceMs\":$since,\"checkedAtMs\":$((now - 60000))}"
   run_heal
-  [[ "$(jget status)" == "healed" ]] || die "status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget status)" == "observe" ]] || die "status=$(jget status) reason=$(jget reason)"
+  [[ "$(jget action)" == "none" ]] || die "frozen hint authorized recovery"
   [[ "$(jget reason)" == "heartbeat_frozen" ]] || die "reason=$(jget reason)"
-  [[ "$(jget readiness)" == "ready" ]] || die "readiness=$(jget readiness)"
+  [[ "$(jget readiness)" == "heartbeat_frozen_observe" ]] || die "readiness=$(jget readiness)"
 }
 
 t_frozen_under_threshold() {
@@ -1293,11 +1297,9 @@ plistlib.dump({"Label": "x", "EnvironmentVariables": {
     open(sys.argv[1], "wb"))
 PY
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "install failed"
-  # Operator overrides win, including HEAL_ON_HELPER_MISSING. The template does
-  # not pin that key. HELPER_MISSING_SEC and the other numeric keys are script
-  # defaults; an operator value already on disk is still preserved.
+  # Stage 0 resets helper recovery. Other numeric overrides are preserved.
   # Beacon env is still preserved. Kit-owned PATH comes from the template.
-  t_install_env_check "$pl" "HEAL_ON_HELPER_MISSING=1;HELPER_MISSING_SEC=120;HELPER_BASELINE_SEC=900;HELPER_EXPECTED=2;BEACON_URL=https://example.invalid;HEAL_ON_STUCK_SESSION=1;PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+  t_install_env_check "$pl" "RECOVERY_MODE=observe;HEAL_ON_HELPER_MISSING=0;HELPER_MISSING_SEC=120;HELPER_BASELINE_SEC=900;HELPER_EXPECTED=2;BEACON_URL=https://example.invalid;HEAL_ON_STUCK_SESSION=1;PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
     || die "helper env not preserved"
 }
 
@@ -1305,20 +1307,19 @@ t_install_template_helper_defaults() {
   local home="$TMP/home3"; local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
   mkdir -p "$home"
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "fresh install failed"
-  # Absent means the script default (1, policy (a)). Pinning 0 in the template would make
-  # a reinstall look like the operator chose log-only. Pinning 1 would freeze the new default.
+  # Stage 0 explicitly pins recovery off on a fresh install.
   python3 - "$pl" <<'PY' || die "script-owned helper defaults must not be pinned by the template"
 import plistlib, sys
 env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
-for key in ("HEAL_ON_HELPER_MISSING", "HELPER_EXPECTED", "HELPER_MISSING_SEC", "HELPER_BASELINE_SEC", "HELPER_RELAUNCH_WINDOW_SEC"):
+assert env["HEAL_ON_HELPER_MISSING"] == "0", env
+assert env["RECOVERY_MODE"] == "observe", env
+for key in ("HELPER_EXPECTED", "HELPER_MISSING_SEC", "HELPER_BASELINE_SEC", "HELPER_RELAUNCH_WINDOW_SEC"):
     assert key not in env, (key, env)
 PY
 }
 
 t_install_helper_missing_opt_in_survives() {
-  # An operator value of HEAL_ON_HELPER_MISSING is kept across reinstall.
-  # The template does not pin the key, so the script default applies when it is absent.
-  # A plist that never had the key still omits it (script default 0).
+  # A legacy opt-in is demoted; only explicit invocation options enable recovery.
   local home="$TMP/home-optin"
   local pl="$home/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist"
   mkdir -p "$home"
@@ -1326,17 +1327,21 @@ t_install_helper_missing_opt_in_survives() {
   python3 - "$pl" <<'PY' || die "fresh install pinned HEAL_ON_HELPER_MISSING"
 import plistlib, sys
 env = plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]
-assert "HEAL_ON_HELPER_MISSING" not in env, env
+assert env["HEAL_ON_HELPER_MISSING"] == "0", env
+assert env["RECOVERY_MODE"] == "observe", env
 PY
   python3 - "$pl" <<'PY'
 import plistlib, sys
 path = sys.argv[1]
 pl = plistlib.load(open(path, "rb"))
 pl["EnvironmentVariables"]["HEAL_ON_HELPER_MISSING"] = "1"
+pl["EnvironmentVariables"]["RECOVERY_MODE"] = "active"
 plistlib.dump(pl, open(path, "wb"))
 PY
   HOME="$home" INSTALL_SKIP_LAUNCHD=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "reinstall failed"
-  t_install_env_check "$pl" "HEAL_ON_HELPER_MISSING=1" || die "opt-in forced back to 0"
+  t_install_env_check "$pl" "RECOVERY_MODE=observe;HEAL_ON_HELPER_MISSING=0" || die "legacy opt-in preserved silently"
+  HOME="$home" INSTALL_SKIP_LAUNCHD=1 INSTALL_RECOVERY_MODE=active INSTALL_HELPER_HEAL=1 bash "$ROOT/install.sh" >/dev/null 2>&1 || die "explicit install opt-in failed"
+  t_install_env_check "$pl" "RECOVERY_MODE=active;HEAL_ON_HELPER_MISSING=1" || die "explicit opt-in lost"
 }
 
 t_helper_baseline_never_rises() {
@@ -2946,6 +2951,89 @@ run_case T-codex-any-exit t_codex_any_exit
 run_case T-codex-wal-stale t_codex_wal_stale
 run_case T-beacon-window-elapsed-honors t_beacon_window_elapsed_honors
 echo
+t_stage0_blocks_every_recovery() {
+  unset RECOVERY_MODE
+  beacon_env
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  codex_on
+  export CODEX_REOPEN_POLICY=any_exit
+  export CODEX_PS_FILE="$TMP/codex-empty.ps"
+  : > "$CODEX_PS_FILE"
+  run_heal
+  [[ "$(jget status)" == "restart_blocked" && "$(jget readiness)" == "observation_only" ]] || die "stage0 Grok not blocked"
+  [[ "$(cget status)" == "observation_only" ]] || die "stage0 Codex not blocked"
+  [[ -f "$LATCH_DIR/grok-bot-local-exec-heal.request" ]] || die "stage0 consumed request"
+  [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "stage0 spent a recovery attempt"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "stage0 contacted beacon"
+  [[ ! -s "$CODEX_OPEN_LOG" ]] || die "stage0 opened Codex"
+}
+
+t_continuity_first_tick_and_gap() {
+  unset HEAL_TEST_CONTINUOUS
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  run_heal
+  [[ "$(jget readiness)" == "observation_required" ]] || die "first tick authorized restart"
+  [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "first tick spent budget"
+  python3 - "$LATCH_DIR/grok-bot-observation-clock.json" <<'PYCLOCK'
+import json, sys, time, os
+path = sys.argv[1]
+json.dump({"wall":time.time()-600,"monotonic":time.monotonic()-60,"mode":"active"},open(path,"w"))
+os.chmod(path,0o600)
+PYCLOCK
+  run_heal
+  [[ "$(jget readiness)" == "observation_required" ]] || die "wake-like gap authorized restart"
+  [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "gap spent budget"
+}
+
+t_unknown_process_identity_observes() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/dead-pid" "$GROK_SUPPORT_DIR" "$now"
+  printf '{bad json' > "$GROK_SUPPORT_DIR/desktop-status.json"
+  run_heal
+  [[ "$(jget reason)" == "signal_unavailable" && "$(jget action)" == "none" ]] || die "unreadable identity authorized restart"
+  [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "unknown signal spent budget"
+}
+
+t_invalid_opt_in_writes_nothing() {
+  local home="$TMP/invalid-home"
+  if HOME="$home" INSTALL_SKIP_LAUNCHD=1 INSTALL_HELPER_HEAL=1 bash "$ROOT/install.sh" >/dev/null 2>&1; then
+    die "helper opt-in without active was accepted"
+  fi
+  [[ ! -e "$home" ]] || die "invalid option wrote files"
+  grep -q 'RECOVERY_MODE="$INSTALL_RECOVERY_MODE" HEAL_ON_HELPER_MISSING="$INSTALL_HELPER_HEAL" "$SCRIPT_DST"' "$ROOT/install.sh" || die "post-install tick lost installed policy"
+}
+
+t_bad_heartbeat_is_not_stale_authorization() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/stale-hb" "$GROK_SUPPORT_DIR" "$now"
+  local kind
+  for kind in future mismatched missing; do
+    python3 - "$GROK_SUPPORT_DIR/dune-reliability/sessions/test.running.json" "$kind" "$now" <<'PYHB'
+import json, os, sys
+path, kind, now = sys.argv[1:]
+if kind == "missing":
+    os.unlink(path)
+else:
+    json.dump({"pid":9999 if kind == "mismatched" else 4242,
+               "heartbeatAtMs":int(now)+60000 if kind == "future" else int(now)-600000,
+               "bootOutcome":"ready"},open(path,"w"))
+PYHB
+    run_heal
+    [[ "$(jget action)" == "none" ]] || die "$kind heartbeat authorized restart"
+    [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "$kind heartbeat spent budget"
+  done
+}
+
+run_case T-invalid-opt-in-writes-nothing t_invalid_opt_in_writes_nothing
+run_case T-bad-heartbeat-no-authorization t_bad_heartbeat_is_not_stale_authorization
+
+run_case T-stage0-blocks-every-recovery t_stage0_blocks_every_recovery
+run_case T-continuity-first-tick-and-gap t_continuity_first_tick_and_gap
+run_case T-unknown-process-identity-observes t_unknown_process_identity_observes
+
 echo "passed=$PASS failed=$FAIL"
 if (( FAIL > 0 )); then
   exit 1

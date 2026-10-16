@@ -130,8 +130,41 @@ def prune_window(now, values):
     return [value for value in values if 0 <= now - float(value) < 3600]
 
 
+def observation_status(now, monotonic, previous, mode):
+    """Conservative continuity check; a wake-like wall/uptime divergence blocks recovery.
+
+    This is not an authoritative sleep/wake or all-lanes-idle signal.
+    """
+    if mode != "active" or not isinstance(previous, dict) or previous.get("mode") != "active":
+        return "observation_required"
+    wall, uptime = previous.get("wall"), previous.get("monotonic")
+    for value in (now, monotonic, wall, uptime):
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            return "observation_required"
+    elapsed, running = now - wall, monotonic - uptime
+    if not 0 < elapsed <= 180 or running <= 0 or abs(elapsed - running) > 2:
+        return "observation_required"
+    return "continuous"
+
+
+def observe(directory):
+    path = Path(directory) / "grok-bot-observation-clock.json"
+    try:
+        previous = private_json(path, optional=True)
+        now, monotonic = time.time(), time.monotonic()
+        mode = "active" if os.environ.get("RECOVERY_MODE") == "active" else "observe"
+        result = observation_status(now, monotonic, previous, mode)
+        atomic_json(path, {"wall": now, "monotonic": monotonic, "mode": mode})
+        print(result)
+    except Exception:
+        print("observation_error")
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) == 2 and argv[0] == "--observe":
+        observe(argv[1])
+        return
     directory, raw_pid = argv[0:2]
     reason = argv[2] if len(argv) > 2 else "helper_missing"
     key = argv[3] if len(argv) > 3 else "grok"

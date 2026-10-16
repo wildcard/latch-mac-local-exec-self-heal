@@ -27,6 +27,26 @@ class GateTests(unittest.TestCase):
     def setUp(self):
         self.lease = {"issuedAt": 990, "expiresAt": 1200, "pid": 42, "idleConfirmed": True}
 
+    def test_continuity_gate_requires_two_valid_active_samples(self):
+        previous = {"wall": 1000, "monotonic": 500, "mode": "active"}
+        self.assertEqual(guard.observation_status(1060, 560, previous, "active"), "continuous")
+        for now, uptime, prev, mode in (
+            (1060,560,None,"active"), (1060,560,previous,"observe"),
+            (1600,560,previous,"active"), (1060,501,previous,"active"),
+            (999,560,previous,"active"), (1060,10,previous,"active"),
+            (1060,560,{**previous,"wall":float("nan")},"active"),
+            (1060,560,{**previous,"mode":"observe"},"active")):
+            self.assertEqual(guard.observation_status(now, uptime, prev, mode), "observation_required")
+
+    def test_observation_clock_fails_closed_without_rewriting_unsafe_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grok-bot-observation-clock.json"
+            path.write_text("{}")
+            path.chmod(0o644)
+            proc = subprocess.run([sys.executable,str(GUARD_PATH),"--observe",directory],capture_output=True,text=True)
+            self.assertEqual(proc.stdout.strip(), "observation_error")
+            self.assertEqual(path.read_text(), "{}")
+
     def test_active_work_is_held_even_with_valid_idle_file(self):
         self.assertEqual(guard.decision(1000, 42, self.lease, [], held=True), "maintenance_hold")
 
@@ -246,7 +266,7 @@ class GateTests(unittest.TestCase):
                 "HEAL_LOG": str(base / "heal.log"),
                 "HEAL_STATE": str(base / "state.json"),
                 "PYTHON": sys.executable,
-                "HEAL_DRY_RUN": "1",
+                "HEAL_TEST_MODE": "1", "HEAL_DRY_RUN": "1", "RECOVERY_MODE": "active", "HEAL_TEST_CONTINUOUS": "1",
                 "HEAL_TRUST_PID": "1",
                 "HEAL_DISABLE_PGREP": "1",
                 "HELPER_CHECK": "0",

@@ -223,7 +223,7 @@ def live_rows():
             "exe": exe,
             "command": command,
         })
-    return rows
+    return rows or None
 
 
 def _base_result(policy, watched, app_present):

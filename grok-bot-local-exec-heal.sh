@@ -3,8 +3,9 @@
 # + helper-count observer for the S-NEW-D helper-exit signature, + Codex keep-alive).
 # Runs on the Mac without cloud connectivity.
 # Relaunches Grok Bot.app when the desktop process is down, the dune-reliability
-# heartbeat is stale, bootOutcome is not ready, the heartbeat timestamp is frozen,
-# a NodeService helper has been missing, or an operator drops grok-bot-local-exec-heal.request.
+# heartbeat is stale, or bootOutcome is not ready, under explicit active policy;
+# explicit helper opt-in or an operator request can also request recovery.
+# Stage 0 is observe-only. Frozen heartbeat/socket hints never authorize recovery.
 # Also reopens the Codex desktop app (bundle com.openai.codex) when its main process
 # is absent, under CODEX_REOPEN_POLICY (default crash_only). Never quits a running Codex.
 #
@@ -15,8 +16,8 @@
 #
 # 1.5.0: counts Grok Bot Helper processes of the node.mojom.NodeService utility type under the
 # main pid. One fewer than the learned (or configured) baseline for >= HELPER_MISSING_SEC is the
-# S-NEW-D helper-exit signature. 1.6.0 relaunches on that signal by default
-# (HEAL_ON_HELPER_MISSING=1, policy (a): no idle authorization). Set the flag to 0 for log-only.
+# S-NEW-D helper-exit signature. Stage 0 observes this signal by default.
+# Recovery needs RECOVERY_MODE=active and HEAL_ON_HELPER_MISSING=1.
 # Set HELPER_IDLE_REQUIRED=1 to require a PID-bound one-use idle authorization for helper loss.
 #
 # Cursor is NOT auto-relaunched (local-exec path is Grok Bot.app).
@@ -68,7 +69,9 @@ HELPER_CHECK="${HELPER_CHECK:-1}"
 # after HELPER_RELAUNCH_WINDOW_SEC. A beacon, operator, heartbeat-stale, or process-down
 # relaunch keeps the same floor when a helper-short interval is already open. A later outage
 # can relaunch only once the count has met the floor and the window has elapsed.
-HEAL_ON_HELPER_MISSING="${HEAL_ON_HELPER_MISSING:-1}"
+HEAL_ON_HELPER_MISSING="${HEAL_ON_HELPER_MISSING:-0}"
+# Stage 0: all app recovery is observe-only, including Codex and operator/beacon paths.
+RECOVERY_MODE="${RECOVERY_MODE:-observe}"
 # 1 = helper_missing also needs a PID-bound one-use idle lease. Default 0 is policy (a).
 HELPER_IDLE_REQUIRED="${HELPER_IDLE_REQUIRED:-0}"
 # Helper count below the expected level for at least this long → helper_missing.
@@ -212,7 +215,7 @@ if os.path.isfile(ds_path):
         ds = json.load(open(ds_path))
         raw = ds.get("pid") if isinstance(ds, dict) else None
         if raw is not None and str(raw).strip() != "":
-            pid = int(raw)
+            pid = raw if type(raw) is int and 0 < raw < 2147483648 else None
     except Exception:
         ds = None
         reason_bits.append("desktop_status_unreadable")
@@ -222,8 +225,13 @@ if pid:
     if trust_pid:
         alive = True
     else:
-        r = subprocess.run(["kill", "-0", str(pid)], capture_output=True)
-        alive = r.returncode == 0
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except (PermissionError, OSError):
+            reason_bits.append("process_signal_unreadable")
 if not alive and not pid and not disable_pgrep:
     r = subprocess.run(
         ["pgrep", "-f", r"/Applications/Grok Bot\.app/Contents/MacOS/Grok Bot$"],
@@ -246,6 +254,10 @@ for fpath in sessions:
         j = json.load(open(fpath))
         hb = j.get("heartbeatAtMs")
         if hb is None:
+            continue
+        if type(hb) not in (int, float) or not math.isfinite(hb) or not 0 < hb <= now_ms:
+            continue
+        if pid is not None and (type(j.get("pid")) is not int or j["pid"] != pid):
             continue
         hb = int(hb)
         if newest is None or hb > newest[0]:
@@ -493,7 +505,8 @@ try:
                                     capture_output=True, text=True, timeout=10)
                 rcmd = subprocess.run([ps_bin, "-axww", "-o", "pid=,command="],
                                       capture_output=True, text=True, timeout=10)
-                if rc.returncode == 0 and rcmd.returncode == 0:
+                if (rc.returncode == 0 and rcmd.returncode == 0
+                        and rc.stdout.strip() and rcmd.stdout.strip()):
                     commands = {}
                     for ln in rcmd.stdout.splitlines():
                         m = re.match(r"\s*(\d+)\s+(.*)$", ln)
@@ -512,6 +525,8 @@ try:
                         rows.append((p_, int(m.group(2)), m.group(3), m.group(4).strip(), cmd))
             except Exception:
                 rows = None
+        if rows is not None and not any(p_ == pid and under_app(cmd) for p_, pp_, etime, comm, cmd in rows):
+            rows = None
         if rows is not None:
             helper_count = 0
             for p_, pp_, etime, comm, cmd in rows:
@@ -672,7 +687,11 @@ reason = "healthy"
 readiness = "local_healthy"
 hint = ""
 
-if not alive:
+if not isinstance(ds, dict) or not pid or pid <= 0 or "process_signal_unreadable" in reason_bits:
+    reason = "signal_unavailable"
+    readiness = "signal_unavailable"
+    hint = "Missing or unreadable process identity is not proof of an absent app. Observe only."
+elif not alive:
     need = True
     reason = "process_down"
     readiness = "process_down"
@@ -697,9 +716,10 @@ elif boot and boot != "ready":
     reason = "boot_outcome_%s" % token
     readiness = "boot_not_ready"
 elif frozen_hit:
-    need = True
+    helper_observe = True
     reason = "heartbeat_frozen"
-    readiness = "heartbeat_frozen"
+    readiness = "heartbeat_frozen_observe"
+    hint = "An unchanged heartbeat is a weak hint, not restart authorization. Observe only."
 elif helper_hit and h_heal:
     need = True
     reason = "helper_missing"
@@ -1384,6 +1404,14 @@ restart_guard_check() {
   local pid="${2:-}"
   local key="${3:-grok}"
   local guard="$LATCH_DIR/bin/grok-bot-restart-guard.py"
+  if [[ "$RECOVERY_MODE" != "active" ]]; then
+    GUARD_RESULT="observation_only"
+    return 0
+  fi
+  if [[ "${OBSERVATION_RESULT:-observation_required}" != "continuous" ]]; then
+    GUARD_RESULT="${OBSERVATION_RESULT:-observation_required}"
+    return 0
+  fi
   GUARD_RESULT="restart_guard_missing"
   if [[ -L "$guard" ]]; then
     GUARD_RESULT="restart_guard_error"
@@ -1526,6 +1554,14 @@ if [[ -f "$DISABLE" ]]; then
   exit 0
 fi
 
+# Sample continuity once per tick, under the single-flight lock. The test bypass
+# cannot be enabled in production. Missing/invalid clocks and wake-like gaps block recovery.
+OBSERVATION_RESULT="observation_required"
+if [[ "${HEAL_TEST_MODE:-}" == "1" && "${HEAL_TEST_CONTINUOUS:-}" == "1" ]]; then
+  OBSERVATION_RESULT="continuous"
+elif [[ -f "$LATCH_DIR/bin/grok-bot-restart-guard.py" && ! -L "$LATCH_DIR/bin/grok-bot-restart-guard.py" ]]; then
+  OBSERVATION_RESULT="$(RECOVERY_MODE="$RECOVERY_MODE" "$PYTHON" "$LATCH_DIR/bin/grok-bot-restart-guard.py" --observe "$LATCH_DIR" 2>/dev/null)" || OBSERVATION_RESULT="observation_error"
+fi
 codex_tick
 
 if [[ ! -d "$APP_PATH" ]]; then
@@ -1580,7 +1616,7 @@ fi
 # in the Worker until its exp). Do not poll when a local heal is already needed — ack-on-read would
 # burn the flag if cooldown then skips the relaunch (Worker 5m lockout). Still poll inside the
 # beacon suppress window so a second request can escalate. A local operator_request wins when we do poll.
-if [[ "${NEED_HEAL}" != "1" ]]; then
+if [[ "${NEED_HEAL}" != "1" && "$RECOVERY_MODE" == "active" && "$OBSERVATION_RESULT" == "continuous" ]]; then
   beacon_poll
 fi
 if [[ "${BEACON_PENDING:-0}" == "1" && "${REASON}" != "operator_request" && "${NEED_HEAL}" != "1" ]]; then
@@ -1643,8 +1679,8 @@ fi
 
 if [[ "${NEED_HEAL}" != "1" ]]; then
   if [[ "${HELPER_OBSERVE:-0}" == "1" ]]; then
-    log "observe reason=helper_missing pid=${PID:-} helpers=${HELPER_COUNT:-?}/${HELPER_EXPECTED_EFF:-?} missing_for=${HELPER_MISSING_FOR:-?}s heal_on_helper_missing=0 (log-only)"
-    write_state "observe" "helper_missing" "none"
+    log "observe reason=$REASON pid=${PID:-} helpers=${HELPER_COUNT:-?}/${HELPER_EXPECTED_EFF:-?} missing_for=${HELPER_MISSING_FOR:-?}s heal_on_helper_missing=0 (log-only)"
+    write_state "observe" "$REASON" "none"
     exit 0
   fi
   log "ok reason=$REASON pid=${PID:-} heartbeat_age=${HEARTBEAT_AGE:-n/a} readiness=$READINESS helpers=${HELPER_COUNT:-n/a}/${HELPER_EXPECTED_EFF:-n/a}"

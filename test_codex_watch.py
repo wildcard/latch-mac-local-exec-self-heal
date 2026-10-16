@@ -116,7 +116,7 @@ class MatchTests(unittest.TestCase):
             state = logs / "GrokBotLocalExecHeal-last.json"
             state.write_text(json.dumps({"codex": {"pid": 9000, "launchedAtMs": 1000}}))
             env = {"PATH": os.environ["PATH"], "HOME": str(base), "HEAL_TEST_MODE": "1",
-                   "HEAL_DRY_RUN": "1", "CODEX_APP_PATH": str(app), "CODEX_PS_FILE": str(ps),
+                   "HEAL_DRY_RUN": "1", "RECOVERY_MODE": "active", "HEAL_TEST_CONTINUOUS": "1", "CODEX_APP_PATH": str(app), "CODEX_PS_FILE": str(ps),
                    "CODEX_CRASH_DIR": str(crash), "CODEX_READINESS_WAIT_SEC": "1",
                    "GROK_APP_PATH": str(base / "absent"), "PYTHON": codex.sys.executable}
             codex.subprocess.run(["/bin/bash", str(ROOT / "grok-bot-local-exec-heal.sh")],
