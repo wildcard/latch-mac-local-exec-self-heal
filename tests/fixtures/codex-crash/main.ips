@@ -1,0 +1,2 @@
+{"app_name":"ChatGPT","bug_type":"309","bundleID":"com.openai.codex","timestamp":"2026-01-01 09:17:28.4512 -0700"}
+{"procName":"ChatGPT","captureTime":"2026-01-01 09:17:28.4512 -0700","bundleInfo":{"CFBundleIdentifier":"com.openai.codex"},"exception":{"type":"EXC_BAD_ACCESS"}}

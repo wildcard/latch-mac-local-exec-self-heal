@@ -32,7 +32,13 @@ Human step, not run from this repo. With Wrangler already signed in to the **per
 
 ## Mac side
 
-The optional poll hook lives in the heal script (one POST per 60s tick, then the `operator_request` heal path with reason `beacon_request`, disable file wins).
+The optional poll hook lives in the heal script (one POST per 60s tick, then the `operator_request` heal path with reason `beacon_request`, disable file wins). A second request inside `BEACON_RELAUNCH_WINDOW_SEC` stays suppressed. Once that window has elapsed, the next request is honored.
+
+## Writer command (operator worker host)
+
+`bin/beacon-heal-request` is not installed on the Mac. `BEACON_WRITER_TOKEN_FILE` is required and has no default path; set it to `<path-to-writer-token-file>`. The command refuses a token file with group or world bits, and refuses a `BEACON_URL` that is not `https://` (including userinfo). It POSTs `{v:1, action:heal_request, machineId, jti, exp}` to `$BEACON_URL/v1/heal-request`. Output is `<status> <jti>` or `dry-run <jti>`. The token is never printed and is not placed in argv. `--dry-run` does not connect.
+
+    BEACON_URL=https://<operator-worker-host> BEACON_WRITER_TOKEN_FILE=<path-to-writer-token-file> bin/beacon-heal-request --dry-run MACHINE_ID
 
 ## Not done yet
 

@@ -1,5 +1,36 @@
 # Latch mac-local-exec-self-heal
 
+## 1.6.0 clock correction — 2026-10-20 (source only)
+
+- Diagnose the failed bounded crash proof: matching crash detected, but separate Apple Python 3.9 `monotonic()` origins made continuity refuse recovery before any attempt was recorded.
+- Use Darwin's system-wide, sleep-excluding `CLOCK_UPTIME_RAW`; tag observation records by version/source and require a fresh observation on migration. Retain all clock/stop/budget gates and fail closed without a relative-clock fallback.
+- Add separate-interpreter and bypass-free reopen fixtures. No reinstall, re-enable, new live fault or merge. See [failure analysis](docs/1.6.0/RECOVERY-FAILURE-2026-10-20.md).
+
+## 1.6.0 maintenance follow-up — 2026-10-20 (draft)
+
+- Prepare a private complete install candidate and source/installed-file drift manifest without touching the running kit. Persist a reviewed allowlisted policy file after environment merge. Malformed prior plist migration fails before executable replacement.
+- Support an explicit previously-unloaded maintenance handoff after a consistent rollback snapshot; verify domain access and exact-job absence before copying executables.
+- Require a confirmed maintenance window and hold for live installation, reject an active watchdog lock, unload before replacing executables, and never automatically enable an owner-disabled job.
+- Respect Grok quit markers, require primary PID-matched crash evidence for an absent Grok process, skip held beacon polling, and recheck stop controls at action boundaries. Retire the old intentional-quit live prove.
+- Validate selected Codex/ChatGPT bundle and executable identities, open the configured app path, refresh presence before opening, and reject production any-exit. Bound report reads and remove the default private-database readiness path.
+- Preserve per-key budgets, backoff, continuity, helper floor suppression, no-force-kill and rollback requirements. Live recovery, authoritative wake/all-lanes idleness and full prior-bot/cross-bot transcript coverage remain open. No installation or merge performed. See the [maintenance packet](docs/1.6.0/MAINTENANCE-CANDIDATE.md).
+
+## 1.6.0 — 2026-10-12
+
+- Follow-up review: normalize macOS report fractions for Python 3.9 using synthetic fixtures; use a single argv-free Codex process snapshot; remove installer kickstart/direct extra tick; stop incomplete gentle quits without force killing or duplicate open; expose mode/clock/guard status; verify owned 0600 legacy ledger caps; minimize identifying metadata in current review docs. Earlier commits retain removed metadata; no history rewrite or repository-wide privacy clearance is claimed.
+
+Keep-alive for a recent outage: helper loss relaunches by default, a shared restart guard caps every restart, and Codex reopens only on a matching crash unless the operator opts into any-exit.
+
+- **Stage 0 safety revision, 2026-10-16.** `RECOVERY_MODE=observe` and `HEAL_ON_HELPER_MISSING=0` are pinned by the installer and default in the script. Every default reinstall demotes legacy active/helper settings. Active recovery requires `INSTALL_RECOVERY_MODE=active`, with `INSTALL_HELPER_HEAL=1` as a separate helper opt-in. Stage 0 does not poll the beacon or spend restart attempts. A PID-bound idle lease is not evidence of all-lanes idleness. First active tick, invalid observation state and long/wake-like gaps block recovery; authoritative wake detection remains unproved. Frozen heartbeat/socket hints alone never authorize recovery. See [migration and remaining gates](docs/1.6.0/STAGE0-2026-10-16.md).
+- **Restart guard.** `grok-bot-restart-guard.py` is installed into the kit bin directory. The heal script calls it immediately before quit/`open` (Grok Bot, key `grok`) and before a Codex reopen (key `codex`). The attempt is written to `grok-bot-restart-attempts.json` before either command. Backoff is 300s, doubling to 1800s. Three attempts for one key in a rolling hour; the next is `circuit_open`. `grok-bot-restart.hold` blocks every path, including a symlink, and is checked before the ledger. A missing guard is `restart_guard_missing` and blocks the Grok relaunch. A symlink guard is not executed. Unsafe or malformed state (wrong owner or mode, bad JSON, a non-number, bool, string, NaN, infinity, negative, or future timestamp in any key) is `restart_guard_error` and does not rewrite the file. A legacy flat attempt list is the grok key and is rewritten as version 2 on the next allow. A blocked relaunch leaves the request file in place. The escalate hint is `Restart suppressed: <result>.`
+- **Codex keep-alive.** `codex-watch.py` watches `/Applications/ChatGPT.app` (bundle id `com.openai.codex`). The main process matches comm `ChatGPT` and the bundle executable path. Helper names, ChatGPT Classic, and a `ChatGPT.localized` path do not match. `CODEX_WATCH` empty means on when the app directory exists, otherwise a no-op. `CODEX_REOPEN_POLICY=crash_only` (plist default) reopens with `open -gb com.openai.codex` only when a regular crash report for that bundle and main process is newer than the last observed launch. No prior launch means no reopen. `any_exit` reopens whenever the main process is absent. Pause file `codex.pause`, the global disable file, and the maintenance hold block a reopen. The kit never kills or quits Codex and does not relaunch on a stall. Readiness is the main process up within `CODEX_READINESS_WAIT_SEC`, and a fresh `CODEX_WAL_FILE` mtime when that path is set. State is a `codex` object in `last.json`. Crash-report file names are not stored. A missing watcher does not abort the Grok Bot tick.
+- **Beacon window.** Unchanged logic. A second request inside `BEACON_RELAUNCH_WINDOW_SEC` stays `beacon_suppressed`. At exactly that window, and after it, the next request is honored and still passes the restart guard. `T-beacon-window-elapsed-honors` covers 3599s and 3600s.
+- **Sockets.** Established :443 counts for Grok Bot helpers are logged on every tick that has helper pids (`helper_sockets`), not only on snapshot ticks. Still observe-only. Addresses are not logged.
+- **Operator-host command, not installed on the Mac.** `worker-beacon/bin/beacon-heal-request` reads the writer token from `BEACON_WRITER_TOKEN_FILE`. That variable is required and has no default path. The command refuses a non-https URL, supports `--dry-run`, and prints only the HTTP status and the client `jti`. The token is never printed and is not placed in argv.
+- **Not carried from the installed hot-patch:** a local version suffix, and an escalate sentence that mentioned idle authorization. Version is `1.6.0`. The hint does not mention idle authorization.
+- **Deferred:** a live prove needs a maintenance window. An auto-review rule for `beacon-heal-request` is not in this kit. Prove D is still open.
+- Tests: hermetic shell cases under `HEAL_TEST_MODE=1` (no live `open` / `osascript` / `kill`), `python3 -m unittest`, and `cd worker-beacon && npm test`.
+
 ## 1.5.0 — 2026-10-07
 
 S-NEW-D helper-exit signature, from the real 2026-10-07 outage (Prove D **FAIL**: the kit logged healthy for ~50 min, no agent posted the beacon, the app recovered on its own). Record: [`docs/1.5.0/PROVE-D-FAIL-2026-10-07.md`](docs/1.5.0/PROVE-D-FAIL-2026-10-07.md).
