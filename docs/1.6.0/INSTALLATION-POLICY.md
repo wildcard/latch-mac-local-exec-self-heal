@@ -1,5 +1,9 @@
 # Owner installation policy and rollback
 
+> Historical decision packet. The current preparation and stricter installation
+> interface are documented in [MAINTENANCE-CANDIDATE.md](MAINTENANCE-CANDIDATE.md).
+> The rollback and budget-preservation requirements below remain applicable.
+
 This is a decision packet and future maintenance runbook, not permission to install
 or activate anything. No commands that install, reload, restart, change policy or
 write the installed ledger were run for this documentation update. Default behavior

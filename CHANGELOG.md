@@ -1,5 +1,13 @@
 # Latch mac-local-exec-self-heal
 
+## 1.6.0 maintenance follow-up — 2026-10-20 (draft)
+
+- Prepare a private complete install candidate and source/installed-file drift manifest without touching the running kit. Persist a reviewed allowlisted policy file after environment merge. Malformed prior plist migration fails before executable replacement.
+- Require a confirmed maintenance window and hold for live installation, reject an active watchdog lock, unload before replacing executables, and never automatically enable an owner-disabled job.
+- Respect Grok quit markers, require primary PID-matched crash evidence for an absent Grok process, skip held beacon polling, and recheck stop controls at action boundaries. Retire the old intentional-quit live prove.
+- Validate selected Codex/ChatGPT bundle and executable identities, open the configured app path, refresh presence before opening, and reject production any-exit. Bound report reads and remove the default private-database readiness path.
+- Preserve per-key budgets, backoff, continuity, helper floor suppression, no-force-kill and rollback requirements. Live recovery, authoritative wake/all-lanes idleness and full prior-bot/cross-bot transcript coverage remain open. No installation or merge performed. See the [maintenance packet](docs/1.6.0/MAINTENANCE-CANDIDATE.md).
+
 ## 1.6.0 — 2026-10-12
 
 - Follow-up review: normalize macOS report fractions for Python 3.9 using synthetic fixtures; use a single argv-free Codex process snapshot; remove installer kickstart/direct extra tick; stop incomplete gentle quits without force killing or duplicate open; expose mode/clock/guard status; verify owned 0600 legacy ledger caps; minimize identifying metadata in current review docs. Earlier commits retain removed metadata; no history rewrite or repository-wide privacy clearance is claimed.

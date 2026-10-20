@@ -115,3 +115,8 @@ See [Stage 0 migration and proof gates](1.6.0/STAGE0-2026-10-16.md).
 | Quit timeout does not force kill or duplicate open | `T-quit-timeout-no-force` with command stubs | Not exercised on live apps |
 | Clock/budget status visibility | `T-clock-status-visible`, backoff status assertion | No runtime modification |
 | Legacy owned 0600 attempts ledger | Python cap/no-rewrite compatibility case | No installed ledger modified |
+
+
+## Maintenance follow-up
+
+See [the current maintenance packet](1.6.0/MAINTENANCE-CANDIDATE.md) for the stricter quit/crash boundary, private preparation and approved installation sequence. New shell regressions cover quit-marker precedence, dangling disable, Grok absence versus matching PID crash, and a pause arriving after guard authorization. `test_maintenance.py` covers private staging/drift, malformed migration, production any-exit refusal, Codex/ChatGPT identity profiles, bounded crash reads and maintenance refusal. These are hermetic checks; live proof remains pending.

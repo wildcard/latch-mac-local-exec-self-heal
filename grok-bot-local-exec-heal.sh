@@ -128,7 +128,7 @@ fi
 
 # Codex desktop keep-alive. Empty CODEX_WATCH means on when the bundle exists, no-op when it does not.
 # crash_only reopens only for a matching main-process crash report newer than the last observed launch.
-# any_exit reopens whenever the main process is absent. Neither mode quits a running Codex.
+# Production rejects any_exit. A running desktop app is never quit by this watcher.
 CODEX_WATCH="${CODEX_WATCH:-}"
 CODEX_APP_PATH="${CODEX_APP_PATH:-/Applications/ChatGPT.app}"
 CODEX_BUNDLE_ID="${CODEX_BUNDLE_ID:-com.openai.codex}"
@@ -687,7 +687,11 @@ reason = "healthy"
 readiness = "local_healthy"
 hint = ""
 
-if not isinstance(ds, dict) or not pid or pid <= 0 or "process_signal_unreadable" in reason_bits:
+if "quit_requested" in reason_bits:
+    reason = "intentional_quit"
+    readiness = "intentional_quit"
+    hint = "The app recorded a quit request. Recovery waits for a manual app launch."
+elif not isinstance(ds, dict) or not pid or pid <= 0 or "process_signal_unreadable" in reason_bits:
     reason = "signal_unavailable"
     readiness = "signal_unavailable"
     hint = "Missing or unreadable process identity is not proof of an absent app. Observe only."
@@ -742,7 +746,7 @@ else:
         reason = reason + "+" + ",".join(reason_bits)
 
 request_exists = os.path.isfile(request_path)
-if request_exists:
+if request_exists and reason != "intentional_quit":
     # Force relaunch even when local signals look healthy. Consumed by the shell on heal start.
     need = True
     helper_observe = False
@@ -1124,7 +1128,7 @@ data = {
     "observationStatus": os.environ.get("W_OBSERVATION") if os.environ.get("W_OBSERVATION") in
         ("continuous", "observation_required", "observation_error") else "not_checked",
     "restartGuardResult": os.environ.get("W_GUARD") if os.environ.get("W_GUARD") in
-        ("allow", "observation_only", "observation_required", "observation_error", "maintenance_hold",
+        ("disabled", "paused", "allow", "observation_only", "observation_required", "observation_error", "maintenance_hold",
          "retry_backoff", "circuit_open", "restart_guard_missing", "restart_guard_error",
          "idle_authorization_required", "idle_authorization_expired_or_invalid",
          "idle_authorization_invalid", "idle_authorization_pid_changed") else "not_evaluated",
@@ -1413,6 +1417,10 @@ restart_guard_check() {
   local pid="${2:-}"
   local key="${3:-grok}"
   local guard="$LATCH_DIR/bin/grok-bot-restart-guard.py"
+  if ! recovery_controls_clear "$key"; then
+    GUARD_RESULT="$CONTROL_RESULT"
+    return 0
+  fi
   if [[ "$RECOVERY_MODE" != "active" ]]; then
     GUARD_RESULT="observation_only"
     return 0
@@ -1436,6 +1444,20 @@ restart_guard_check() {
   fi
 }
 
+# Recheck at action boundaries: a control created during a tick must stop the
+# next action. Any filesystem entry (including a dangling symlink) blocks.
+recovery_controls_clear() {
+  CONTROL_RESULT="allow"
+  if [[ -e "$DISABLE" || -L "$DISABLE" ]]; then
+    CONTROL_RESULT="disabled"
+  elif [[ -e "$LATCH_DIR/grok-bot-restart.hold" || -L "$LATCH_DIR/grok-bot-restart.hold" ]]; then
+    CONTROL_RESULT="maintenance_hold"
+  elif [[ "${1:-}" == "codex" && ( -e "$CODEX_PAUSE" || -L "$CODEX_PAUSE" ) ]]; then
+    CONTROL_RESULT="paused"
+  fi
+  [[ "$CONTROL_RESULT" == "allow" ]]
+}
+
 codex_note() {
   local status="$1"
   CODEX_DECISION="$LATCH_DIR/.codex-decision.json"
@@ -1443,7 +1465,7 @@ codex_note() {
 }
 
 # Codex keep-alive. Runs even when Grok Bot.app is missing. Skipped when the global disable file is set.
-# Reopen goes through the restart guard under the codex key, then open -gb. Never kill or quit Codex.
+# Reopen goes through the restart guard under the codex key, then open -g by verified app path. Never kill or quit Codex.
 codex_tick() {
   local watch_py="$LATCH_DIR/bin/codex-watch.py"
   CODEX_DECISION="$LATCH_DIR/.codex-decision.json"
@@ -1457,11 +1479,12 @@ codex_tick() {
       mkdir -p "$CODEX_CRASH_DIR"
     fi
   else
+    if ! recovery_controls_clear codex; then
+      codex_note "$CONTROL_RESULT"
+      return 0
+    fi
     if [[ -z "${CODEX_CRASH_DIR:-}" ]]; then
       CODEX_CRASH_DIR="${HOME}/Library/Logs/DiagnosticReports"
-    fi
-    if [[ -z "${CODEX_WAL_FILE:-}" ]]; then
-      CODEX_WAL_FILE="${HOME}/.codex/logs_2.sqlite-wal"
     fi
   fi
   export CODEX_CRASH_DIR CODEX_WAL_FILE
@@ -1502,10 +1525,24 @@ PY
   if [[ "$HEAL_DRY_RUN" == "1" ]]; then
     log "dry-run: skip codex open"
   else
+    if ! recovery_controls_clear codex; then
+      codex_note "$CONTROL_RESULT"
+      return 0
+    fi
+    # Refresh identity and process presence after authorization. A fresh scan
+    # may cancel an attempt; its already-recorded budget is never refunded.
+    if ! HEAL_STATE="$STATE" "$PYTHON" "$watch_py" decide "$LATCH_DIR" "$CODEX_DECISION"; then
+      codex_note "watch_error"
+      return 0
+    fi
+    action="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action") or "none")' "$CODEX_DECISION" 2>/dev/null || echo none)"
+    if [[ "$action" != "reopen" ]] || ! recovery_controls_clear codex; then
+      return 0
+    fi
     if [[ "${HEAL_TEST_MODE:-}" == "1" && -n "${CODEX_OPEN_BIN:-}" ]]; then
-      "$CODEX_OPEN_BIN" -gb "$CODEX_BUNDLE_ID" || true
+      "$CODEX_OPEN_BIN" -g "$CODEX_APP_PATH" || true
     else
-      open -gb "$CODEX_BUNDLE_ID" || true
+      open -g "$CODEX_APP_PATH" || true
     fi
   fi
   if [[ "${HEAL_TEST_MODE:-}" == "1" && -n "${CODEX_PS_AFTER_FILE:-}" ]]; then
@@ -1517,6 +1554,10 @@ PY
   ready=0
   i=1
   while (( i <= tries )); do
+    if ! recovery_controls_clear codex; then
+      codex_note "$CONTROL_RESULT"
+      return 0
+    fi
     if "$PYTHON" "$watch_py" probe "$LATCH_DIR" "$CODEX_DECISION" "$opened_ms"; then
       ready=1
       break
@@ -1554,7 +1595,7 @@ if [[ -z "${SCAN_FILE:-}" ]]; then
 fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true; [[ -n "${SCAN_FILE:-}" ]] && rm -f "$SCAN_FILE"' EXIT
 
-if [[ -f "$DISABLE" ]]; then
+if [[ -e "$DISABLE" || -L "$DISABLE" ]]; then
   log "skip: disable file present ($DISABLE)"
   PID="" ALIVE=0 HEARTBEAT_AGE="" HEARTBEAT_AT_MS="" BOOT=""
   READINESS="disabled" ESCALATE_HINT="" FROZEN_SINCE="" OK_SINCE="" UNCHANGED_FOR_SEC=""
@@ -1625,7 +1666,7 @@ fi
 # in the Worker until its exp). Do not poll when a local heal is already needed — ack-on-read would
 # burn the flag if cooldown then skips the relaunch (Worker 5m lockout). Still poll inside the
 # beacon suppress window so a second request can escalate. A local operator_request wins when we do poll.
-if [[ "${NEED_HEAL}" != "1" && "$RECOVERY_MODE" == "active" && "$OBSERVATION_RESULT" == "continuous" ]]; then
+if [[ "${NEED_HEAL}" != "1" && "$REASON" != "intentional_quit" && "$RECOVERY_MODE" == "active" && "$OBSERVATION_RESULT" == "continuous" ]] && recovery_controls_clear grok; then
   beacon_poll
 fi
 if [[ "${BEACON_PENDING:-0}" == "1" && "${REASON}" != "operator_request" && "${NEED_HEAL}" != "1" ]]; then
@@ -1697,6 +1738,20 @@ if [[ "${NEED_HEAL}" != "1" ]]; then
   exit 0
 fi
 
+# A dead process alone cannot distinguish a crash from a deliberate app quit.
+# Require a primary crash report for this PID after its last heartbeat. Requests
+# also cannot override an observed quit marker. Missing proof stays observe-only.
+if [[ "${ALIVE:-0}" != "1" ]] && [[ "${HEAL_TEST_MODE:-}" != "1" || "${HEAL_TEST_PROCESS_DOWN_PROVEN:-}" != "1" ]]; then
+  crash_dir="${GROK_CRASH_DIR:-$HOME/Library/Logs/DiagnosticReports}"
+  watch_py="$LATCH_DIR/bin/codex-watch.py"
+  if [[ -L "$watch_py" || ! -f "$watch_py" ]] || ! "$PYTHON" "$watch_py" grok-crash "$crash_dir" "${HEARTBEAT_AT_MS:-0}" "${PID:-0}"; then
+    READINESS="crash_required"
+    ESCALATE_HINT="Absent app has no matching crash evidence; respect a possible intentional quit. Open it manually to resume."
+    write_state "observe" "$REASON" "none"
+    exit 0
+  fi
+fi
+
 restart_guard_check "$REASON" "${PID:-}" "grok"
 GROK_GUARD_RESULT="$GUARD_RESULT"
 if [[ "$GUARD_RESULT" != "allow" ]]; then
@@ -1724,10 +1779,20 @@ if [[ "$HEAL_DRY_RUN" == "1" ]]; then
     log "dry-run: support dir swapped for readiness probe"
   fi
 else
+  if ! recovery_controls_clear grok; then
+    READINESS="$CONTROL_RESULT"
+    write_state "restart_blocked" "$ORIG_REASON" "none"
+    exit 0
+  fi
   if pgrep -f '^/Applications/Grok Bot[.]app/Contents/MacOS/Grok Bot( |$)' >/dev/null 2>&1; then
     log "gentle quit via AppleScript"
     osascript -e 'tell application "Grok Bot" to quit' >/dev/null 2>&1 || true
     for _i in $(seq 1 "$QUIT_WAIT_SEC"); do
+      if ! recovery_controls_clear grok; then
+        READINESS="$CONTROL_RESULT"
+        write_state "restart_blocked" "$ORIG_REASON" "quit_attempt"
+        exit 0
+      fi
       if ! pgrep -f '^/Applications/Grok Bot[.]app/Contents/MacOS/Grok Bot( |$)' >/dev/null 2>&1; then
         break
       fi
@@ -1742,6 +1807,11 @@ else
     fi
   fi
 
+  if ! recovery_controls_clear grok; then
+    READINESS="$CONTROL_RESULT"
+    write_state "restart_blocked" "$ORIG_REASON" "quit_attempt"
+    exit 0
+  fi
   log "open -ga Grok Bot"
   open -ga "Grok Bot" || open -a "Grok Bot"
 

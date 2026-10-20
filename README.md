@@ -8,11 +8,11 @@ It does not need a cloud shell. Once the desktop link is gone, a remote agent ca
 
 ## Status
 
-- **Kit:** LaunchAgent, install and hermetic tests. Can recover a confirmed dead process, a valid stale heartbeat, a bad `bootOutcome`, and an on-Mac `.request` file after explicit active opt-in (table below).
+- **Kit:** LaunchAgent, install and hermetic tests. Can recover a confirmed main-process crash, a valid stale heartbeat, a bad `bootOutcome`, and an on-Mac `.request` file after explicit active opt-in (table below).
 - **Beacon (optional, off by default):** a heal-only inbox. The Worker in [`worker-beacon/`](worker-beacon/) runs on the operator's personal Cloudflare (https://<operator-worker-host>); the Mac polls it outbound over HTTPS only (non-`https://` `BEACON_URL` is refused). A pending request relaunches Grok Bot (reason `beacon_request`) and bypasses the 300s cooldown. Proven live: [Prove C′ on 1.4.1](docs/1.4.1/PROVE-C-1.4.1-2026-10-05.md), [`.disable` wins](docs/1.4.0/PROVE-DISABLE-2026-10-05.md).
 - **S-NEW-D (silent disconnect, moving heartbeat):** `cloudConnectObservable` is always `false`. **1.5.0** adds a Mac-local observer for the **helper-exit signature** (one of two `Grok Bot Helper` `node.mojom.NodeService` utility processes gone while the main process stays healthy): reason `helper_missing`. **1.6.0 Stage 0** keeps that signal observe-only (`HEAL_ON_HELPER_MISSING=0`, `RECOVERY_MODE=observe`). Recovery requires explicit opt-ins for both active mode and helper healing. `HELPER_IDLE_REQUIRED=1` opts back into a PID-bound one-use idle authorization. Prove D remains open: [`docs/1.5.0/PROVE-D-FAIL-2026-10-07.md`](docs/1.5.0/PROVE-D-FAIL-2026-10-07.md). The agent runbook is [`docs/1.5.0/AGENT-LOOP.md`](docs/1.5.0/AGENT-LOOP.md); its immediate-relaunch rule is a proposal, not kit behavior. Background: [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md).
 - **Restart guard (1.6.0):** every Grok Bot relaunch and every Codex reopen writes an attempt to `grok-bot-restart-attempts.json` before quit or `open`. Backoff starts at 300s and doubles to 1800s. Three attempts for one key inside a rolling hour return `circuit_open`. A `grok-bot-restart.hold` file blocks every restart path. A missing guard fails closed (`restart_guard_missing`). `install.sh` always installs the guard.
-- **Codex keep-alive (1.6.0):** if `/Applications/ChatGPT.app` is present, the kit watches the main process (bundle id `com.openai.codex`, comm `ChatGPT`, matched by bundle path and pid). Default policy `crash_only` reopens with `open -gb com.openai.codex` only when a matching crash report is newer than the last observed launch and active recovery is explicitly enabled. `CODEX_REOPEN_POLICY=any_exit` reopens whenever that main process is absent. The kit never kills a running Codex. A pause file, the global disable file, and the maintenance hold all block a reopen.
+- **Codex keep-alive (1.6.0):** if `/Applications/ChatGPT.app` is present, the kit watches the main process (bundle id `com.openai.codex`, comm `ChatGPT`, matched by bundle path and pid). Default policy `crash_only` reopens the configured app path with `open -g` only when a matching crash report is newer than the last observed launch and active recovery is explicitly enabled. `CODEX_REOPEN_POLICY=any_exit` is rejected in production to respect intentional quits. The kit never kills a running Codex. A pause file, the global disable file, and the maintenance hold all block a reopen.
 - **Every capability, its test, live proof and status:** [`docs/CAPABILITY-CHECKS.md`](docs/CAPABILITY-CHECKS.md). History by version: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Stage 0 and migration
@@ -61,13 +61,13 @@ PID. Frozen timestamps and socket counts alone remain observe-only, even in acti
 
 | Signal on the Mac | Action |
 |---|---|
-| Main process not alive | Gentle quit (if needed) + `open -ga "Grok Bot"` |
+| Main process not alive | Require a matching primary crash report for that PID after its last heartbeat; otherwise observe a possible intentional quit |
 | Newest dune-reliability heartbeat older than `HEARTBEAT_STALE_SEC` (180s) | Relaunch |
 | `bootOutcome` present and not `ready` | Relaunch |
 | Same pid and the same `heartbeatAtMs` for ≥ `STUCK_SEC` (120s) | Observe only (`heartbeat_frozen`); never restart authorization |
 | File `grok-bot-local-exec-heal.request` present | One-shot relaunch even if the app looks healthy (`operator_request`) |
 | NodeService helper count below expected for ≥ `HELPER_MISSING_SEC` (300s) (1.5.0) | **Observe by default**; recovery requires `RECOVERY_MODE=active` plus `HEAL_ON_HELPER_MISSING=1`, then `helper_suppressed` while the count is still below the floor. `=0` is log-only (`status=observe`). Every relaunch also passes the restart guard |
-| Codex main process absent (1.6.0) | Reopen with `open -gb com.openai.codex` when `CODEX_WATCH` is on. `crash_only` (default) needs a matching crash report newer than the last observed launch. `any_exit` reopens on any absence. Never kills a running Codex |
+| Codex main process absent (1.6.0) | Reopen the configured app path with `open -g` when `CODEX_WATCH` is on. `crash_only` (default) needs a matching crash report newer than the last observed launch. `any_exit` is rejected in production. Never kills a running Codex |
 
 Success (`status=healed`, `readiness=ready`) requires the process to be up **and** either a finite heartbeat younger than `HEARTBEAT_STALE_SEC` or `bootOutcome=ready`, within `READINESS_WAIT_SEC` (default 75s). Process-up alone is not success.
 
@@ -123,7 +123,7 @@ A remote agent that is already disconnected **cannot** drop that file. The reque
 | S8 | Sleep / lid closed | No | No false `healed`. Not a wake agent |
 | S9 / S-NEW-D | Cloud disconnected, Mac looks healthy | Beacon | A beacon POST relaunches. The agent runbook’s immediate-relaunch rule is a proposal ([agent loop](docs/1.5.0/AGENT-LOOP.md)). Long ok streak sets `escalateHint` |
 | S-NEW-D helper exit | Main healthy, one NodeService helper gone (1.5.0) | Explicit active/helper opt-ins only | `helper_missing` relaunches once, then suppressed while still short. `HEAL_ON_HELPER_MISSING=0` stays `observe` |
-| Codex main down | ChatGPT.app main process absent (1.6.0) | Yes, when the app is installed | `crash_only` reopens only with a matching crash report. `any_exit` reopens on absence. Pause, disable, and hold win. A running Codex is never killed |
+| Codex main down | ChatGPT.app main process absent (1.6.0) | Yes, when the app is installed | `crash_only` reopens only with a matching crash report. `any_exit` is rejected in production. Pause, disable, and hold win. A running Codex is never killed |
 | S10 | Intentional quit | Yes, by design | Comes back within ~60s unless `.disable` is set |
 | — | Frozen heartbeat timestamp | Observe only | Reason `heartbeat_frozen`; never restart authorization by itself |
 | — | Operator request file | Yes | Reason `operator_request` |
@@ -134,12 +134,20 @@ This kit does **not** claim a green result for sleep or network loss.
 
 On the Mac:
 
+Prepare a candidate without changing the installed job:
+
 ```bash
-cd mac-local-exec-self-heal
-./install.sh
+mkdir -p .latch-local
+python3 prepare-install.py .latch-local/maintenance-candidate
+python3 prepare-install.py .latch-local/maintenance-candidate --check
 ```
 
-Re-running copies the script and plist template and reloads the agent. macOS only.
+The complete policy, future install command, protected maintenance sequence and
+rollback are in [the maintenance packet](docs/1.6.0/MAINTENANCE-CANDIDATE.md).
+Live installation now requires `INSTALL_MAINTENANCE_CONFIRMED=1` and an existing
+maintenance hold, and waits for the watchdog to be unloaded before replacing
+executables. It never runs `launchctl enable`, removes controls, or takes a second
+watchdog tick. A disabled job remains the owner's decision. macOS only.
 
 For the first live week, set `HELPER_EXPECTED=2`. Put it in the LaunchAgent plist so a reinstall keeps it, the same way `BEACON_*` is kept. The template does not pin the key. `install.sh` preserves an existing `HELPER_EXPECTED` (`T-install-preserves-helper-env`).
 
@@ -150,7 +158,7 @@ launchctl bootout "gui/$(id -u)/com.latch.grok-bot-local-exec-heal" 2>/dev/null 
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist
 ```
 
-Custom LaunchAgent `EnvironmentVariables` are preserved except kit-owned `PATH`, `RECOVERY_MODE` and `HEAL_ON_HELPER_MISSING`. The latter two intentionally reset to Stage 0 on default reinstall; see the migration above. `HEAL_TEST_MODE` is removed. The template pins `CODEX_REOPEN_POLICY=crash_only`; any-exit does not bypass the observation mode or continuity gate. `INSTALL_RESET_ENV=1` deliberately resets remaining settings to the template. `INSTALL_SKIP_LAUNCHD=1` is for temporary-HOME hermetic tests only.
+Custom LaunchAgent `EnvironmentVariables` are preserved except kit-owned `PATH`, `RECOVERY_MODE` and `HEAL_ON_HELPER_MISSING`. The latter two intentionally reset to Stage 0 on default reinstall; see the migration above. `HEAL_TEST_MODE` is removed. The template pins `CODEX_REOPEN_POLICY=crash_only`; legacy any-exit is rejected in production. A reviewed `INSTALL_POLICY_FILE` persists the explicit maintenance choices after the normal environment merge. `INSTALL_RESET_ENV=1` deliberately resets remaining settings to the template. `INSTALL_SKIP_LAUNCHD=1` is for temporary-HOME hermetic tests only.
 
 ## Disable / unload
 
@@ -189,22 +197,22 @@ cat ~/Library/Logs/GrokBotLocalExecHeal-last.json
 
 ### Restart guard (1.6.0)
 
-`install.sh` copies `grok-bot-restart-guard.py` into the kit bin directory. The heal script calls it immediately before quit/`open` for Grok Bot (`key=grok`) and before `open -gb` for Codex (`key=codex`). The attempt is appended to `grok-bot-restart-attempts.json` (mode `0600`) before either command runs. A legacy flat list is accepted as the grok key and rewritten as `{"v":2,"attempts":{...}}` on the next allow. One bad element (non-number, bool, string, NaN, infinity, negative, or a future timestamp) fails the whole file closed (`restart_guard_error`) and does not rewrite it. A symlink, wrong owner, or group/world-readable state file also fails closed. A missing guard file is `restart_guard_missing` and blocks the Grok relaunch. Backoff is `min(1800, 300 * 2^(n-1))` seconds after n attempts in the rolling hour. The fourth attempt inside that hour is `circuit_open` (the cap is three). `grok-bot-restart.hold` (including a symlink) returns `maintenance_hold` before the ledger is read and blocks every key.
+`install.sh` copies `grok-bot-restart-guard.py` into the kit bin directory. The heal script calls it immediately before quit/`open` for Grok Bot (`key=grok`) and before `open -g` for Codex (`key=codex`). The attempt is appended to `grok-bot-restart-attempts.json` (mode `0600`) before either command runs. A legacy flat list is accepted as the grok key and rewritten as `{"v":2,"attempts":{...}}` on the next allow. One bad element (non-number, bool, string, NaN, infinity, negative, or a future timestamp) fails the whole file closed (`restart_guard_error`) and does not rewrite it. A symlink, wrong owner, or group/world-readable state file also fails closed. A missing guard file is `restart_guard_missing` and blocks the Grok relaunch. Backoff is `min(1800, 300 * 2^(n-1))` seconds after n attempts in the rolling hour. The fourth attempt inside that hour is `circuit_open` (the cap is three). `grok-bot-restart.hold` (including a symlink) returns `maintenance_hold` before the ledger is read and blocks every key.
 
 ### Codex keep-alive (1.6.0)
 
 | Env | Default | Meaning |
 |---|---|---|
 | `CODEX_WATCH` | *(empty = auto)* | Empty: watch when `CODEX_APP_PATH` exists, otherwise `app_absent` and no reopen. `0` does not scan. `1` watches and reports `app_absent` when the bundle directory is missing. Any other value is `watch_invalid` and does not reopen |
-| `CODEX_APP_PATH` | `/Applications/ChatGPT.app` | Bundle directory. The main process is comm `ChatGPT` and executable `$CODEX_APP_PATH/Contents/MacOS/ChatGPT`. Helpers, ChatGPT Classic, and a `ChatGPT.localized` path do not match |
-| `CODEX_BUNDLE_ID` | `com.openai.codex` | Passed to `open -gb`. Also the crash-report bundle token |
-| `CODEX_REOPEN_POLICY` | `crash_only` | `crash_only` reopens only when a regular `.ips` or `.crash` file names this bundle and the main process, and is newer than the last observed launch. No prior launch means no reopen. `any_exit` reopens whenever the main process is absent. Anything else is `policy_invalid` |
+| `CODEX_APP_PATH` | `/Applications/ChatGPT.app` | Bundle directory. Info.plist selects main executable `ChatGPT` or, for Codex, `Codex`. Exact bundle path required; helpers and unrelated apps do not match |
+| `CODEX_BUNDLE_ID` | `com.openai.codex` | Must match the configured app Info.plist and primary crash identity. Supported: `com.openai.codex`, `com.openai.chat` |
+| `CODEX_REOPEN_POLICY` | `crash_only` | `crash_only` reopens only when a regular `.ips` or `.crash` file names this bundle and the main process, and is newer than the last observed launch. No prior launch means no reopen. `any_exit` and unsupported policies return `policy_invalid` in production |
 | `CODEX_PAUSE` | `~/Library/Application Support/Latch/codex.pause` | Present, including as a symlink, blocks a reopen |
 | `CODEX_READINESS_WAIT_SEC` | `30` | How long to wait for the main process after `open`. Optional freshness: if `CODEX_WAL_FILE` is set and is a regular file, its mtime must be at least the open time. A symlink is not fresh |
 
 The process matcher accepts both the short name and macOS full-path `comm`, with an exact bundle executable match. Live observation uses one `comm` snapshot without collecting argv; it does not join separate process snapshots. A failed process scan is `process_scan_error` and cannot authorize a reopen. The watcher reads the resolved state path even when `HEAL_STATE` is not exported. Crash reports must have the primary bundle/process identity and an explicit event timestamp after the last observed launch; file modification time alone is insufficient. JSON IPS reports up to 4 MiB and legacy text `.crash` reports are supported; malformed, undated, oversized, or future reports fail closed.
 
-The global disable file skips Codex as well as Grok Bot. The maintenance hold blocks a reopen through the same guard. Codex is evaluated even when Grok Bot.app is missing. The kit never quits or kills Codex, including on a stall. Set `CODEX_REOPEN_POLICY=any_exit` in the LaunchAgent environment to reopen on any exit. `crash_only` stays the plist default.
+The global disable file skips Codex as well as Grok Bot. The maintenance hold blocks a reopen through the same guard. Codex is evaluated even when Grok Bot.app is missing. The kit never quits or kills Codex, including on a stall. `crash_only` is the supported production policy. The legacy `any_exit` branch is reachable only in the hermetic test harness. A second process/identity check immediately before open may cancel an already-budgeted attempt. No private Codex database path is used as a default readiness signal; readiness means process presence, not cloud reconnection.
 
 macOS diagnostics: the unified log can label Grok Bot under another Electron app's name — filter `log show` by `processID`; in zsh call `/usr/bin/log` (`log` is a builtin). Snapshots taken before a relaunch are `GrokBotLocalExecHeal-snap-*-before.json` (file `0600`, directory `0700`). `exe` is `Grok Bot`, `Grok Bot Helper`, or `Grok Bot Helper` with suffix `(GPU)`, `(Renderer)`, `(Plugin)`, or `(Alerts)`; anything else is `other`. `type` is `utility`, `renderer`, `gpu-process`, `zygote`, or `other`. Stored `subType` is one of the five service names or null. Full command lines are not stored. Allowlisted flags (`--type`, `--utility-sub-type`) are kept only for processes inside the app. No tokens, no app-log tails.
 
@@ -226,7 +234,7 @@ Live prove — **quits Grok Bot.app** — only on macOS, only when you set `LIVE
 LIVE=1 ./tests/live-process-down.sh
 ```
 
-Without `LIVE=1` the live script exits 2 and does nothing. It is not called by `run-tests.sh`.
+This legacy intentional-quit prove now always exits 2 without app commands: normal quits must remain stopped. Use a separately approved bounded crash/reconnection proof during maintenance. It is not called by `run-tests.sh`.
 
 ## Paths
 
@@ -249,7 +257,7 @@ Cursor is not relaunched unless `HEAL_CURSOR=1`. The local-exec path is Grok Bot
 
 ## Risk
 
-If you quit Grok Bot on purpose, this agent brings it back unless the disable file or the maintenance hold is set. A relaunch can briefly bounce the Dock icon. Duplicate instances are mitigated by quit-first. Codex is not quit. With active recovery enabled, under `crash_only` an intentional Codex quit with no crash report stays down. Under `any_exit` an intentional quit comes back unless `codex.pause`, the disable file, or the hold is set. The restart guard caps both at three attempts per rolling hour.
+An observed Grok quit request blocks recovery, including local and beacon requests. An absent Grok process requires matching crash evidence; absence alone stays down. Codex/ChatGPT normal exits stay down under production crash-only policy. Disable, hold and desktop pause controls are rechecked before app actions and during waits; controls cannot retract an OS command already issued. A gentle Grok relaunch can interrupt work, so active maintenance still requires protected work and an approved window. The guard caps each app key at three attempts per rolling hour. A normal OS shutdown, revoked permission, sign-out or network outage is not something this kit overrides.
 
 ## Optional: worker-beacon poll (1.4.0, off by default)
 

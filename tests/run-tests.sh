@@ -47,6 +47,7 @@ setup_env() {
   # see the fixture. HEAL_TEST_MODE is what makes the canned hooks live.
   export HEAL_TEST_MODE=1
   export HEAL_TEST_CONTINUOUS=1
+  export HEAL_TEST_PROCESS_DOWN_PROVEN=1
   export RECOVERY_MODE=active
   export HELPER_CHECK=1
   export HEAL_ON_HELPER_MISSING=0
@@ -118,6 +119,7 @@ PY
 run_case() {
   NAME="$1"
   shift
+  if [[ -n "${TEST_FILTER:-}" && "$NAME" != *"$TEST_FILTER"* ]]; then return 0; fi
   if ( set -euo pipefail; NAME="$NAME"; setup_env; "$@"; ); then
     echo "PASS $NAME"
     PASS=$((PASS + 1))
@@ -2387,6 +2389,7 @@ t_install_post_tick_drops_test_hooks() {
   cat > "$shims/launchctl" <<'EOFSTUB'
 #!/bin/sh
 printf 'launchctl %s\n' "$*" >> "$INSTALL_CALL_LOG"
+[ "$1" = print ] && exit 1
 exit 0
 EOFSTUB
   printf '#!/bin/sh\nexit 0\n' > "$shims/sleep"
@@ -2399,10 +2402,12 @@ exit 1
 EOFSTUB
   done
   chmod +x "$shims/launchctl" "$shims/sleep" "$shims/open" "$shims/osascript" "$shims/pkill"
-  HOME="$home" PATH="$shims:$PATH" INSTALL_SKIP_LAUNCHD=0 INSTALL_RECOVERY_MODE=active INSTALL_HELPER_HEAL=1 bash "$ROOT/install.sh" > "$TMP/install-output" 2>&1 || die "stubbed installer failed"
+  mkdir -p "$home/Library/Application Support/Latch"
+  touch "$home/Library/Application Support/Latch/grok-bot-restart.hold"
+  HOME="$home" PATH="$shims:$PATH" INSTALL_MAINTENANCE_CONFIRMED=1 INSTALL_SKIP_LAUNCHD=0 INSTALL_RECOVERY_MODE=active INSTALL_HELPER_HEAL=1 bash "$ROOT/install.sh" > "$TMP/install-output" 2>&1 || die "stubbed installer failed"
   [[ -s "$INSTALL_CALL_LOG" ]] || die "launchctl stub not called"
   grep -q 'bootstrap' "$INSTALL_CALL_LOG" || die "no registration attempt"
-  grep -q 'kickstart\|unexpected-app-command' "$INSTALL_CALL_LOG" && die "extra tick or app operation" || true
+  grep -q 'kickstart\|launchctl enable\|unexpected-app-command' "$INSTALL_CALL_LOG" && die "extra tick or app operation" || true
   [[ ! -e "$home/Library/Application Support/Latch/grok-bot-observation-clock.json" ]] || die "installer sampled continuity directly"
   [[ ! -e "$home/Library/Logs/GrokBotLocalExecHeal-last.json" ]] || die "installer executed an extra tick"
   grep -q 'RunAtLoad owns' "$TMP/install-output" || die "initial observation ownership unclear"
@@ -2650,9 +2655,8 @@ t_guard_hold_wins() {
   export HEAL_NOW_MS="$now"
   touch "$LATCH_DIR/grok-bot-restart.hold"
   run_heal
-  [[ "$(jget status)" == "restart_blocked" ]] || die "beacon status=$(jget status)"
-  [[ "$(jget reason)" == "beacon_request" ]] || die "beacon reason=$(jget reason)"
-  [[ "$(jget readiness)" == "maintenance_hold" ]] || die "beacon readiness=$(jget readiness)"
+  [[ "$(jget status)" == "ok" ]] || die "held healthy status=$(jget status)"
+  [[ ! -s "$BEACON_STUB_CALLS" ]] || die "hold consumed a beacon request"
   grep -q "heal start" "$HEAL_LOG" && die "hold beacon relaunched" || true
 
   : > "$HEAL_LOG"
@@ -2849,7 +2853,7 @@ EOF
   run_heal
   [[ "$(cget status)" == "reopened" ]] || die "codex status=$(cget status) readiness=$(cget readiness)"
   [[ "$(jget status)" == "ok" ]] || die "grok status=$(jget status)"
-  grep -q -- '-gb com.openai.codex' "$CODEX_OPEN_LOG" || die "open args=$(cat "$CODEX_OPEN_LOG")"
+  grep -Fq -- "-g $CODEX_APP_PATH" "$CODEX_OPEN_LOG" || die "open args=$(cat "$CODEX_OPEN_LOG")"
   [[ ! -s "$TMP/killed.log" ]] || die "killed or quit: $(cat "$TMP/killed.log")"
   grep -q "kill\|osascript\|pkill" "$HEAL_LOG" && die "log mentions kill" || true
 }
@@ -3080,6 +3084,77 @@ run_case T-bad-heartbeat-no-authorization t_bad_heartbeat_is_not_stale_authoriza
 run_case T-stage0-blocks-every-recovery t_stage0_blocks_every_recovery
 run_case T-continuity-first-tick-and-gap t_continuity_first_tick_and_gap
 run_case T-unknown-process-identity-observes t_unknown_process_identity_observes
+
+
+t_quit_marker_blocks_requests() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  python3 - "$GROK_SUPPORT_DIR" "$now" <<'PYQUIT'
+import json, pathlib, sys
+for path in pathlib.Path(sys.argv[1]).glob('dune-reliability/sessions/*.running.json'):
+    data=json.loads(path.read_text()); data['quitRequestedAtMs']=int(sys.argv[2])-1000
+    path.write_text(json.dumps(data))
+PYQUIT
+  touch "$LATCH_DIR/grok-bot-local-exec-heal.request"
+  run_heal
+  [[ "$(jget reason)" == "intentional_quit" && "$(jget action)" == "none" ]] || die "quit marker overridden"
+  [[ -e "$LATCH_DIR/grok-bot-local-exec-heal.request" ]] || die "request consumed during quit"
+  [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "quit spent budget"
+}
+
+t_dangling_disable_blocks() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/boot-not-ready" "$GROK_SUPPORT_DIR" "$now"
+  ln -s "$TMP/missing-control-target" "$LATCH_DIR/grok-bot-local-exec-heal.disable"
+  run_heal
+  [[ "$(jget status)" == "disabled" ]] || die "dangling disable ignored"
+  [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "disabled spent budget"
+}
+
+t_grok_absence_requires_crash() {
+  unset HEAL_TEST_PROCESS_DOWN_PROVEN
+  export HEAL_TRUST_PID=0
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/dead-pid" "$GROK_SUPPORT_DIR" "$now"
+  export GROK_CRASH_DIR="$TMP/crashes"; mkdir "$GROK_CRASH_DIR"
+  run_heal
+  [[ "$(jget readiness)" == "crash_required" && "$(jget action)" == "none" ]] || die "absence treated as crash"
+  [[ ! -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "absence spent budget"
+  python3 - "$GROK_CRASH_DIR/main.ips" <<'PYCRASH'
+from datetime import datetime, timezone
+import json, sys
+json.dump({'app_name':'Grok Bot','procName':'Grok Bot','pid':2147483646,
+           'bundleID':'com.anysphere.sand','bug_type':'309',
+           'timestamp':datetime.now(timezone.utc).isoformat()},open(sys.argv[1],'w'))
+PYCRASH
+  run_heal
+  grep -q 'heal start reason=process_down' "$HEAL_LOG" || die "matching crash not considered"
+}
+
+t_pause_arrives_after_guard() {
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  export HEAL_DRY_RUN=0 CODEX_REOPEN_POLICY=any_exit
+  export CODEX_PS_FILE="$TMP/empty.ps"; : > "$CODEX_PS_FILE"
+  mv "$LATCH_DIR/bin/grok-bot-restart-guard.py" "$LATCH_DIR/bin/original-guard.py"
+  cat > "$LATCH_DIR/bin/grok-bot-restart-guard.py" <<'PYSTOP'
+import pathlib, subprocess, sys
+base=pathlib.Path(sys.argv[1])
+result=subprocess.run([sys.executable,str(base/'bin/original-guard.py')]+sys.argv[1:],capture_output=True,text=True)
+(base/'codex.pause').touch()
+print(result.stdout.strip())
+PYSTOP
+  run_heal
+  [[ "$(cget status)" == "paused" ]] || die "late pause ignored"
+  [[ ! -s "$CODEX_OPEN_LOG" ]] || die "opened after pause"
+  [[ -e "$LATCH_DIR/grok-bot-restart-attempts.json" ]] || die "spent attempt erased"
+}
+
+run_case T-quit-marker-wins t_quit_marker_blocks_requests
+run_case T-dangling-disable t_dangling_disable_blocks
+run_case T-grok-absence-needs-crash t_grok_absence_requires_crash
+run_case T-late-codex-pause t_pause_arrives_after_guard
 
 echo "passed=$PASS failed=$FAIL"
 if (( FAIL > 0 )); then

@@ -25,6 +25,7 @@ def row(pid, comm, exe, ppid=1):
 
 def cfg(**kwargs):
     base = {
+        "test_mode": True,
         "policy": "crash_only",
         "watch": "1",
         "app_path": APP,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Codex desktop keep-alive decision. Does not quit, kill, or open processes.
 
-The heal script performs `open -gb <bundle id>` only after this module returns
+The heal script performs `open -g <verified app path>` only after this module returns
 action=reopen and the shared restart guard allows that key. Match the main
 process by bundle executable path and pid. Display names and helper comm names
 do not count.
@@ -9,6 +9,7 @@ do not count.
 import json
 from datetime import datetime
 import os
+import plistlib
 import re
 import stat
 import subprocess
@@ -26,12 +27,21 @@ HELPER_COMMS = {
     "ChatGPT Classic",
     "ChatGPT.localized",
 }
+SUPPORTED_BUNDLES = {"com.openai.codex", "com.openai.chat"}
 CRASH_SUFFIXES = (".ips", ".crash")
 CRASH_READ_MAX = 4 * 1024 * 1024
 
 
 def main_executable(app_path):
-    return app_path.rstrip("/") + "/Contents/MacOS/" + MAIN_COMM
+    name = MAIN_COMM
+    try:
+        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as handle:
+            candidate = plistlib.load(handle).get("CFBundleExecutable")
+        if candidate in ("ChatGPT", "Codex"):
+            name = candidate
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return app_path.rstrip("/") + "/Contents/MacOS/" + name
 
 
 def parse_ps_text(text):
@@ -62,7 +72,7 @@ def is_main_process(row, app_path):
     Helper comm names, ChatGPT Classic, and a ChatGPT.localized path do not match.
     """
     comm = row.get("comm")
-    if comm not in (MAIN_COMM, main_executable(app_path)):
+    if comm not in (os.path.basename(main_executable(app_path)), main_executable(app_path)):
         return False
     expected = main_executable(app_path)
     return row.get("exe") == expected
@@ -130,7 +140,7 @@ def crash_identity(text):
         return None
 
 
-def crash_report_matches(path, bundle_id, launched_at_s):
+def crash_report_matches(path, bundle_id, launched_at_s, main_name=MAIN_COMM, expected_pid=None):
     """A regular .ips/.crash file for this bundle main process, newer than launch."""
     if launched_at_s is None:
         return False
@@ -146,15 +156,31 @@ def crash_report_matches(path, bundle_id, launched_at_s):
             return False
         if st.st_size > CRASH_READ_MAX:
             return False
-        with open(path, "r", errors="replace") as handle:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "r", errors="replace") as handle:
+            actual = os.fstat(handle.fileno())
+            if not stat.S_ISREG(actual.st_mode) or actual.st_size > CRASH_READ_MAX:
+                return False
             text = handle.read(CRASH_READ_MAX)
     except OSError:
         return False
+    if expected_pid is not None:
+        try:
+            decoder = json.JSONDecoder()
+            header, end = decoder.raw_decode(text.lstrip())
+            rest = text.lstrip()[end:].strip()
+            body = json.loads(rest) if rest else header
+            report_pid = body.get("pid")
+        except (ValueError, TypeError, AttributeError):
+            match = re.search(r"^Process:\s*.*?\[(\d+)\]\s*$", text, re.M)
+            report_pid = int(match.group(1)) if match else None
+        if type(report_pid) is not int or report_pid != expected_pid:
+            return False
     identity = crash_identity(text)
     if identity is None:
         return False
     bundle, name, crashed, occurred = identity
-    return (bundle == bundle_id and name == MAIN_COMM and crashed
+    return (bundle == bundle_id and name == main_name and crashed
             and float(launched_at_s) < occurred <= time.time())
 
 
@@ -162,16 +188,18 @@ def stat_is_reg(mode):
     return stat.S_ISREG(mode)
 
 
-def find_matching_crash(directory, bundle_id, launched_at_s):
+def find_matching_crash(directory, bundle_id, launched_at_s, main_name=MAIN_COMM, expected_pid=None):
     if not directory or not os.path.isdir(directory):
         return None
     try:
-        names = sorted(os.listdir(directory))
+        names = sorted(name for name in os.listdir(directory) if name.endswith(CRASH_SUFFIXES))
+        if len(names) > 128:
+            return None  # bounded read budget; ask owner to review retention
     except OSError:
         return None
     for name in names:
         path = os.path.join(directory, name)
-        if crash_report_matches(path, bundle_id, launched_at_s):
+        if crash_report_matches(path, bundle_id, launched_at_s, main_name, expected_pid):
             return name
     return None
 
@@ -225,7 +253,7 @@ def live_rows():
         if not match:
             continue
         comm = match.group(4).strip()
-        if comm == MAIN_COMM:
+        if comm in (MAIN_COMM, "Codex"):
             # An unsupported short-name format cannot prove bundle identity.
             return None
         rows.append({"pid": int(match.group(1)), "ppid": int(match.group(2)),
@@ -234,12 +262,12 @@ def live_rows():
     return rows or None
 
 
-def _base_result(policy, watched, app_present):
+def _base_result(policy, watched, app_present, bundle_id=BUNDLE_ID):
     return {
         "watched": watched,
         "appPresent": app_present,
         "policy": policy,
-        "bundleId": BUNDLE_ID,
+        "bundleId": bundle_id,
         "status": "unwatched",
         "running": False,
         "pid": None,
@@ -252,34 +280,46 @@ def _base_result(policy, watched, app_present):
 
 def evaluate(cfg):
     """Return the codex object for last.json. Never opens or signals a process."""
+    bundle_id = cfg.get("bundle_id") or BUNDLE_ID
     policy = cfg.get("policy") or "crash_only"
     watch = cfg.get("watch")
     app_path = cfg.get("app_path") or "/Applications/ChatGPT.app"
     app_present = bool(cfg.get("app_present"))
     if watch == "0" or watch == 0:
-        result = _base_result(policy if policy in ("crash_only", "any_exit") else "crash_only", False, app_present)
+        result = _base_result(policy if policy in ("crash_only", "any_exit") else "crash_only", False, app_present, bundle_id)
         result["status"] = "unwatched"
         return result
     if watch not in ("", "1", 1, None):
-        result = _base_result(policy, False, app_present)
+        result = _base_result(policy, False, app_present, bundle_id)
         result["status"] = "watch_invalid"
         result["watched"] = False
         return result
     if not app_present:
-        result = _base_result(policy if policy in ("crash_only", "any_exit") else policy, False, False)
+        result = _base_result(policy if policy in ("crash_only", "any_exit") else policy, False, False, bundle_id)
         result["status"] = "app_absent"
         result["policy"] = policy if policy in ("crash_only", "any_exit") else "crash_only"
         return result
     if policy not in ("crash_only", "any_exit"):
-        result = _base_result(policy, True, True)
+        result = _base_result(policy, True, True, bundle_id)
         result["status"] = "policy_invalid"
+        return result
+
+    if bundle_id not in SUPPORTED_BUNDLES or cfg.get("identity_valid") is False:
+        result = _base_result(policy, True, True, bundle_id)
+        result.update(status="app_identity_invalid", readiness="app_identity_invalid")
+        return result
+    # Production never reopens an intentional normal exit. Historical any_exit
+    # fixture coverage remains available only under the explicit test harness.
+    if policy == "any_exit" and not cfg.get("test_mode"):
+        result = _base_result(policy, True, True, bundle_id)
+        result.update(status="policy_invalid", readiness="policy_invalid")
         return result
 
     prev = cfg.get("prev") if isinstance(cfg.get("prev"), dict) else {}
     now_ms = int(cfg["now_ms"])
     rows = cfg.get("rows")
     if rows is None:
-        result = _base_result(policy, True, True)
+        result = _base_result(policy, True, True, bundle_id)
         result.update(status="process_scan_error", readiness="process_scan_error",
                       launchedAtMs=_int_or_none(prev.get("launchedAtMs")))
         return result
@@ -288,7 +328,7 @@ def evaluate(cfg):
     launched = _int_or_none(prev.get("launchedAtMs"))
     if launched is not None and not 0 < launched <= now_ms:
         launched = None
-    result = _base_result(policy, True, True)
+    result = _base_result(policy, True, True, bundle_id)
     result["launchedAtMs"] = launched
     result["lastReopenAtMs"] = _int_or_none(prev.get("lastReopenAtMs"))
 
@@ -319,7 +359,7 @@ def evaluate(cfg):
         return result
 
     launched_s = None if launched is None else launched / 1000.0
-    report = find_matching_crash(cfg.get("crash_dir") or "", BUNDLE_ID, launched_s)
+    report = find_matching_crash(cfg.get("crash_dir") or "", bundle_id, launched_s, os.path.basename(main_executable(app_path)))
     if report:
         result["status"] = "down_crash"
         result["readiness"] = "crash_matched"
@@ -382,6 +422,17 @@ def _env_now_ms():
     return int(time.time() * 1000)
 
 
+def bundle_identity_valid(app_path, bundle_id):
+    try:
+        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as handle:
+            info = plistlib.load(handle)
+        return (bundle_id in SUPPORTED_BUNDLES
+                and info.get("CFBundleIdentifier") == bundle_id
+                and info.get("CFBundleExecutable") in (("ChatGPT", "Codex") if bundle_id == BUNDLE_ID else ("ChatGPT",)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def collect_cfg():
     app_path = os.environ.get("CODEX_APP_PATH") or "/Applications/ChatGPT.app"
     watch = os.environ.get("CODEX_WATCH", "")
@@ -394,7 +445,11 @@ def collect_cfg():
     rows = []
     if watch != "0" and app_present:
         rows = read_rows(os.environ.get("CODEX_PS_FILE") or "", test_mode)
+    bundle_id = os.environ.get("CODEX_BUNDLE_ID") or BUNDLE_ID
     return {
+        "bundle_id": bundle_id,
+        "identity_valid": test_mode or bundle_identity_valid(app_path, bundle_id),
+        "test_mode": test_mode,
         "policy": policy,
         "watch": watch,
         "app_path": app_path,
@@ -415,6 +470,14 @@ def write_result(path, obj):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) == 4 and argv[0] == "grok-crash":
+        try:
+            since, pid = int(argv[2]), int(argv[3])
+            if since <= 0 or pid <= 0:
+                return 1
+            return 0 if find_matching_crash(argv[1], "com.anysphere.sand", since / 1000.0, "Grok Bot", pid) else 1
+        except (ValueError, OSError):
+            return 1
     if len(argv) < 2:
         print("usage: codex-watch.py decide|probe LATCH_DIR OUT [OPENED_MS]", file=sys.stderr)
         return 2
