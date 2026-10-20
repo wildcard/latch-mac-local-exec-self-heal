@@ -2984,7 +2984,9 @@ t_continuity_first_tick_and_gap() {
   python3 - "$LATCH_DIR/grok-bot-observation-clock.json" <<'PYCLOCK'
 import json, sys, time, os
 path = sys.argv[1]
-json.dump({"wall":time.time()-600,"monotonic":time.monotonic()-60,"mode":"active"},open(path,"w"))
+sample=json.load(open(path))
+sample.update(wall=time.time()-600,monotonic=sample["monotonic"]-60,mode="active")
+json.dump(sample,open(path,"w"))
 os.chmod(path,0o600)
 PYCLOCK
   run_heal
@@ -3155,6 +3157,39 @@ run_case T-quit-marker-wins t_quit_marker_blocks_requests
 run_case T-dangling-disable t_dangling_disable_blocks
 run_case T-grok-absence-needs-crash t_grok_absence_requires_crash
 run_case T-late-codex-pause t_pause_arrives_after_guard
+
+
+t_system_clock_allows_fixture_reopen_without_continuity_bypass() {
+  unset HEAL_TEST_CONTINUOUS
+  local now; now="$(now_ms)"; export HEAL_NOW_MS="$now"
+  materialize "$FIX/healthy" "$GROK_SUPPORT_DIR" "$now"
+  codex_on
+  export HEAL_DRY_RUN=0
+  seed_state '{"version":2,"status":"ok","pid":4242,"codex":{"pid":9000,"launchedAtMs":1000,"running":true}}'
+  codex_decoys "$TMP/codex-down.ps"
+  write_codex_crash "$CODEX_CRASH_DIR/main.ips"
+  write_codex_ps "$TMP/codex-up.ps" "9001|1|ChatGPT|$CODEX_APP_PATH/Contents/MacOS/ChatGPT"
+  export CODEX_PS_AFTER_FILE="$TMP/codex-up.ps"
+  export CODEX_PS_FILE="$TMP/codex-down.ps"
+  # An earlier process's v2 system-clock sample, aged by a synthetic minute.
+  python3 - "$ROOT/grok-bot-restart-guard.py" "$LATCH_DIR/grok-bot-observation-clock.json" <<'PYSYSTEMCLOCK'
+import importlib.util, json, os, sys, time
+spec=importlib.util.spec_from_file_location('guard',sys.argv[1]);guard=importlib.util.module_from_spec(spec);spec.loader.exec_module(guard)
+uptime, source=guard.observation_clock()
+with open(sys.argv[2],'w') as f:
+    json.dump({'v':2,'clockSource':source,'wall':time.time()-60,'monotonic':uptime-60,'mode':'active'},f)
+os.chmod(sys.argv[2],0o600)
+PYSYSTEMCLOCK
+  run_heal
+  [[ "$(jget observationStatus)" == "continuous" ]] || die "real cross-process clock did not authorize continuity"
+  [[ "$(cget status)" == "reopened" ]] || die "fixture reopen status=$(cget status)"
+  [[ "$(wc -l < "$CODEX_OPEN_LOG" | tr -d ' ')" == "1" ]] || die "fixture open count"
+  python3 - "$LATCH_DIR/grok-bot-restart-attempts.json" <<'PYONEATTEMPT'
+import json,sys
+assert len(json.load(open(sys.argv[1]))['attempts']['codex'])==1
+PYONEATTEMPT
+}
+run_case T-system-clock-cross-process-reopen t_system_clock_allows_fixture_reopen_without_continuity_bypass
 
 echo "passed=$PASS failed=$FAIL"
 if (( FAIL > 0 )); then

@@ -130,12 +130,28 @@ def prune_window(now, values):
     return [value for value in values if 0 <= now - float(value) < 3600]
 
 
-def observation_status(now, monotonic, previous, mode):
+def observation_clock():
+    """A process-independent clock; macOS Python 3.9 monotonic() is process-relative.
+
+    Darwin uptime excludes sleep, preserving the conservative wall/uptime check.
+    Missing/failed clocks are errors, never a fallback to an incomparable clock.
+    """
+    if sys.platform == "darwin":
+        return time.clock_gettime(time.CLOCK_UPTIME_RAW), "darwin_uptime_raw"
+    return time.clock_gettime(time.CLOCK_MONOTONIC), "posix_monotonic"
+
+
+def observation_status(now, monotonic, previous, mode, clock_source):
     """Conservative continuity check; a wake-like wall/uptime divergence blocks recovery.
 
     This is not an authoritative sleep/wake or all-lanes-idle signal.
     """
     if mode != "active" or not isinstance(previous, dict) or previous.get("mode") != "active":
+        return "observation_required"
+    # Old records contain process-relative values on Apple Python 3.9. Never
+    # compare across that migration, or across different system clock domains.
+    if (clock_source not in ("darwin_uptime_raw", "posix_monotonic")
+            or previous.get("v") != 2 or previous.get("clockSource") != clock_source):
         return "observation_required"
     wall, uptime = previous.get("wall"), previous.get("monotonic")
     for value in (now, monotonic, wall, uptime):
@@ -151,10 +167,14 @@ def observe(directory):
     path = Path(directory) / "grok-bot-observation-clock.json"
     try:
         previous = private_json(path, optional=True)
-        now, monotonic = time.time(), time.monotonic()
+        now = time.time()
+        monotonic, clock_source = observation_clock()
+        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in (now, monotonic)):
+            raise ValueError("invalid system clock")
         mode = "active" if os.environ.get("RECOVERY_MODE") == "active" else "observe"
-        result = observation_status(now, monotonic, previous, mode)
-        atomic_json(path, {"wall": now, "monotonic": monotonic, "mode": mode})
+        result = observation_status(now, monotonic, previous, mode, clock_source)
+        atomic_json(path, {"v": 2, "clockSource": clock_source,
+                           "wall": now, "monotonic": monotonic, "mode": mode})
         print(result)
     except Exception:
         print("observation_error")

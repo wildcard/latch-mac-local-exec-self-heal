@@ -8,6 +8,11 @@ It does not need a cloud shell. Once the desktop link is gone, a remote agent ca
 
 ## Status
 
+The bounded desktop crash proof on installed `7ed4b66` timed out with zero reopen
+attempts. A Python 3.9 cross-process clock incompatibility was identified and fixed
+in source; the fix is **not installed** and automatic recovery remains held. See
+[the failure analysis and next validation](docs/1.6.0/RECOVERY-FAILURE-2026-10-20.md).
+
 - **Kit:** LaunchAgent, install and hermetic tests. Can recover a confirmed main-process crash, a valid stale heartbeat, a bad `bootOutcome`, and an on-Mac `.request` file after explicit active opt-in (table below).
 - **Beacon (optional, off by default):** a heal-only inbox. The Worker in [`worker-beacon/`](worker-beacon/) runs on the operator's personal Cloudflare (https://<operator-worker-host>); the Mac polls it outbound over HTTPS only (non-`https://` `BEACON_URL` is refused). A pending request relaunches Grok Bot (reason `beacon_request`) and bypasses the 300s cooldown. Proven live: [Prove C′ on 1.4.1](docs/1.4.1/PROVE-C-1.4.1-2026-10-05.md), [`.disable` wins](docs/1.4.0/PROVE-DISABLE-2026-10-05.md).
 - **S-NEW-D (silent disconnect, moving heartbeat):** `cloudConnectObservable` is always `false`. **1.5.0** adds a Mac-local observer for the **helper-exit signature** (one of two `Grok Bot Helper` `node.mojom.NodeService` utility processes gone while the main process stays healthy): reason `helper_missing`. **1.6.0 Stage 0** keeps that signal observe-only (`HEAL_ON_HELPER_MISSING=0`, `RECOVERY_MODE=observe`). Recovery requires explicit opt-ins for both active mode and helper healing. `HELPER_IDLE_REQUIRED=1` opts back into a PID-bound one-use idle authorization. Prove D remains open: [`docs/1.5.0/PROVE-D-FAIL-2026-10-07.md`](docs/1.5.0/PROVE-D-FAIL-2026-10-07.md). The agent runbook is [`docs/1.5.0/AGENT-LOOP.md`](docs/1.5.0/AGENT-LOOP.md); its immediate-relaunch rule is a proposal, not kit behavior. Background: [`docs/PRODUCT-BAR.md`](docs/PRODUCT-BAR.md).

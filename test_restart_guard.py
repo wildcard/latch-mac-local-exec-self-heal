@@ -7,6 +7,9 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
+import io
 
 
 ROOT = Path(__file__).resolve().parent
@@ -28,15 +31,72 @@ class GateTests(unittest.TestCase):
         self.lease = {"issuedAt": 990, "expiresAt": 1200, "pid": 42, "idleConfirmed": True}
 
     def test_continuity_gate_requires_two_valid_active_samples(self):
-        previous = {"wall": 1000, "monotonic": 500, "mode": "active"}
-        self.assertEqual(guard.observation_status(1060, 560, previous, "active"), "continuous")
+        previous = {"v": 2, "clockSource": "posix_monotonic", "wall": 1000, "monotonic": 500, "mode": "active"}
+        self.assertEqual(guard.observation_status(1060, 560, previous, "active", "posix_monotonic"), "continuous")
         for now, uptime, prev, mode in (
             (1060,560,None,"active"), (1060,560,previous,"observe"),
             (1600,560,previous,"active"), (1060,501,previous,"active"),
             (999,560,previous,"active"), (1060,10,previous,"active"),
             (1060,560,{**previous,"wall":float("nan")},"active"),
             (1060,560,{**previous,"mode":"observe"},"active")):
-            self.assertEqual(guard.observation_status(now, uptime, prev, mode), "observation_required")
+            self.assertEqual(guard.observation_status(now, uptime, prev, mode, "posix_monotonic"), "observation_required")
+
+    def test_clock_domains_and_legacy_samples_require_new_observation(self):
+        previous = {"v": 2, "clockSource": "posix_monotonic", "wall": 1000,
+                    "monotonic": 500, "mode": "active"}
+        for sample, source in (({k:v for k,v in previous.items() if k not in ("v","clockSource")}, "posix_monotonic"),
+                               (previous, "darwin_uptime_raw"), (previous, "unknown")):
+            self.assertEqual(guard.observation_status(1060,560,sample,"active",source),"observation_required")
+
+    def test_darwin_uses_system_uptime_and_never_process_monotonic(self):
+        with patch.object(guard.sys,"platform","darwin"), \
+             patch.object(guard.time,"CLOCK_UPTIME_RAW",123,create=True), \
+             patch.object(guard.time,"clock_gettime",return_value=5000) as read, \
+             patch.object(guard.time,"monotonic") as relative:
+            self.assertEqual(guard.observation_clock(),(5000,"darwin_uptime_raw"))
+            read.assert_called_once_with(123)
+            relative.assert_not_called()
+
+    def test_failed_system_clock_does_not_fallback_or_rewrite_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"grok-bot-observation-clock.json"
+            path.write_text("{}");path.chmod(0o600)
+            output=io.StringIO()
+            with patch.object(guard.time,"clock_gettime",side_effect=OSError), \
+                 patch.object(guard.time,"monotonic") as relative, redirect_stdout(output):
+                guard.observe(directory)
+            self.assertEqual(output.getvalue().strip(),"observation_error")
+            relative.assert_not_called()
+            self.assertEqual(path.read_text(),"{}")
+
+    def test_separate_interpreters_share_clock_and_allow_elapsed_minute(self):
+        # Real OS clock sampling, no app operations. Seed one synthetic earlier
+        # sample with the system-wide clock from a different interpreter.
+        code = ("import importlib.util,json,time; "
+                "s=importlib.util.spec_from_file_location('g',"+repr(str(GUARD_PATH))+"); "
+                "g=importlib.util.module_from_spec(s);s.loader.exec_module(g); "
+                "v,k=g.observation_clock(); print(json.dumps({'v':2,'clockSource':k,"
+                "'wall':time.time()-60,'monotonic':v-60,'mode':'active'}))")
+        with tempfile.TemporaryDirectory() as directory:
+            sample=subprocess.run([sys.executable,"-c",code],capture_output=True,text=True,check=True)
+            path=Path(directory)/"grok-bot-observation-clock.json"
+            path.write_text(sample.stdout);path.chmod(0o600)
+            result=subprocess.run([sys.executable,str(GUARD_PATH),"--observe",directory],
+                                  env={**os.environ,"RECOVERY_MODE":"active"},capture_output=True,text=True,check=True)
+            self.assertEqual(result.stdout.strip(),"continuous")
+            self.assertFalse((Path(directory)/"grok-bot-restart-attempts.json").exists())
+
+    def test_legacy_clock_migrates_once_without_budget_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"grok-bot-observation-clock.json"
+            path.write_text(json.dumps({'wall':time.time()-60,'monotonic':0.01,'mode':'active'}));path.chmod(0o600)
+            def observe():
+                return subprocess.run([sys.executable,str(GUARD_PATH),"--observe",directory],
+                    env={**os.environ,"RECOVERY_MODE":"active"},capture_output=True,text=True,check=True).stdout.strip()
+            self.assertEqual(observe(),"observation_required")
+            self.assertEqual(json.loads(path.read_text())['v'],2)
+            self.assertEqual(observe(),"continuous")
+            self.assertFalse((Path(directory)/"grok-bot-restart-attempts.json").exists())
 
     def test_observation_clock_fails_closed_without_rewriting_unsafe_file(self):
         with tempfile.TemporaryDirectory() as directory:

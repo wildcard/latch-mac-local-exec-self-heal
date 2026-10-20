@@ -1,5 +1,11 @@
 # Latch mac-local-exec-self-heal
 
+## 1.6.0 clock correction — 2026-10-20 (source only)
+
+- Diagnose the failed bounded crash proof: matching crash detected, but separate Apple Python 3.9 `monotonic()` origins made continuity refuse recovery before any attempt was recorded.
+- Use Darwin's system-wide, sleep-excluding `CLOCK_UPTIME_RAW`; tag observation records by version/source and require a fresh observation on migration. Retain all clock/stop/budget gates and fail closed without a relative-clock fallback.
+- Add separate-interpreter and bypass-free reopen fixtures. No reinstall, re-enable, new live fault or merge. See [failure analysis](docs/1.6.0/RECOVERY-FAILURE-2026-10-20.md).
+
 ## 1.6.0 maintenance follow-up — 2026-10-20 (draft)
 
 - Prepare a private complete install candidate and source/installed-file drift manifest without touching the running kit. Persist a reviewed allowlisted policy file after environment merge. Malformed prior plist migration fails before executable replacement.
