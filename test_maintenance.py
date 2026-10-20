@@ -124,3 +124,36 @@ class MaintenanceTests(unittest.TestCase):
             self.assertNotEqual(result.returncode,0)
             self.assertEqual(target.read_text(),'prior-executable')
             self.assertFalse((home/'Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist').exists())
+
+
+    def test_previously_unloaded_handoff_requires_readable_domain_and_absent_job(self):
+        for domain_ok, job_loaded, expected_ok in ((True, False, True), (False, False, False), (True, True, False)):
+            with self.subTest(domain_ok=domain_ok, job_loaded=job_loaded), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                agent = home / 'Library/LaunchAgents/com.latch.grok-bot-local-exec-heal.plist'
+                agent.parent.mkdir(parents=True)
+                agent.write_bytes(plistlib.dumps({'EnvironmentVariables': {}}))
+                root = home / 'Library/Application Support/Latch'
+                (root / 'bin').mkdir(parents=True)
+                (root / 'grok-bot-restart.hold').touch()
+                target = root / 'bin/grok-bot-local-exec-heal.sh'
+                target.write_text('prior-executable')
+                shim = home / 'shims'
+                shim.mkdir()
+                log = home / 'calls'
+                (shim/'launchctl').write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$CALL_LOG"\nif [ "$1" = print ]; then\n case "$2" in\n  */com.latch.*) exit "$JOB_RESULT";;\n  *) exit "$DOMAIN_RESULT";;\n esac\nfi\nexit 0\n')
+                (shim/'sleep').write_text('#!/bin/sh\nexit 0\n')
+                (shim/'launchctl').chmod(0o755)
+                (shim/'sleep').chmod(0o755)
+                env = {'HOME':str(home), 'PATH':str(shim)+':/usr/bin:/bin:/usr/sbin:/sbin',
+                       'PYTHON':sys.executable, 'INSTALL_MAINTENANCE_CONFIRMED':'1',
+                       'INSTALL_PREVIOUSLY_UNLOADED':'1', 'DOMAIN_RESULT':'0' if domain_ok else '1',
+                       'JOB_RESULT':'0' if job_loaded else '1', 'CALL_LOG':str(log)}
+                result = subprocess.run(['/bin/bash',str(ROOT/'install.sh')],env=env,capture_output=True)
+                self.assertEqual(result.returncode==0,expected_ok,result.stderr)
+                calls=log.read_text()
+                self.assertNotIn('bootout',calls)
+                self.assertNotIn('enable',calls)
+                self.assertEqual('bootstrap' in calls,expected_ok)
+                if not expected_ok:
+                    self.assertEqual(target.read_text(),'prior-executable')

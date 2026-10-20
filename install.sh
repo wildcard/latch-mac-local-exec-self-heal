@@ -230,7 +230,14 @@ if [[ "$SKIP_LAUNCHD" != "1" ]]; then
     exit 2
   fi
   UID_NUM="$(id -u)"
-  if [[ -f "$EXISTING_PLIST" ]]; then
+  if [[ "${INSTALL_PREVIOUSLY_UNLOADED:-0}" == "1" ]]; then
+    # The approved rollback runbook unloads before its consistent snapshot.
+    # Establish readable domain access; a denied lookup is not proof of absence.
+    if ! launchctl print "gui/${UID_NUM}" >/dev/null 2>&1; then
+      echo "Cannot verify launchd domain access; installed files left unchanged." >&2
+      exit 5
+    fi
+  elif [[ -f "$EXISTING_PLIST" ]]; then
     if ! launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null; then
       echo "Could not unload existing watchdog; installed files left unchanged." >&2
       exit 5

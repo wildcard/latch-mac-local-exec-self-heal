@@ -3,6 +3,7 @@
 ## 1.6.0 maintenance follow-up — 2026-10-20 (draft)
 
 - Prepare a private complete install candidate and source/installed-file drift manifest without touching the running kit. Persist a reviewed allowlisted policy file after environment merge. Malformed prior plist migration fails before executable replacement.
+- Support an explicit previously-unloaded maintenance handoff after a consistent rollback snapshot; verify domain access and exact-job absence before copying executables.
 - Require a confirmed maintenance window and hold for live installation, reject an active watchdog lock, unload before replacing executables, and never automatically enable an owner-disabled job.
 - Respect Grok quit markers, require primary PID-matched crash evidence for an absent Grok process, skip held beacon polling, and recheck stop controls at action boundaries. Retire the old intentional-quit live prove.
 - Validate selected Codex/ChatGPT bundle and executable identities, open the configured app path, refresh presence before opening, and reject production any-exit. Bound report reads and remove the default private-database readiness path.

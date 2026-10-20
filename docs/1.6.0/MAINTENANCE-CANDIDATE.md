@@ -64,6 +64,7 @@ private backups and hold/unload ordering in
 ```sh
 python3 prepare-install.py .latch-local/maintenance-candidate --check
 INSTALL_MAINTENANCE_CONFIRMED=1 \
+INSTALL_PREVIOUSLY_UNLOADED=1 \
 INSTALL_POLICY_FILE="$PWD/.latch-local/maintenance-candidate/recovery-policy.json" \
   bash ./install.sh
 ```
@@ -79,7 +80,10 @@ is between ticks, create the maintenance hold under the window authorization, an
 make the private byte-for-byte snapshot described in the rollback runbook. The
 installer requires an existing hold and rejects a present watchdog lock. It must
 successfully unload an existing job, then verify it is not loaded, before changing
-executables. Installation failure leaves the hold set for review; do not retry
+executables. If the approved rollback runbook already unloaded it for the snapshot,
+`INSTALL_PREVIOUSLY_UNLOADED=1` skips the duplicate unload only after verifying
+readable launchd domain access; the exact job must still be absent. A denied
+domain lookup or still-loaded job stops before executable replacement. Installation failure leaves the hold set for review; do not retry
 blindly. It does not restore files automatically after a partial filesystem or
 bootstrap failure: use the preserved private backup and budget-preserving rollback.
 

@@ -6,13 +6,15 @@ source remains a draft pending independent review and owner maintenance approval
 
 ## Validation
 
-- Apple Python 3.9: 55 tests passed. New tests cover production policy refusal,
+- Apple Python 3.9: 56 tests passed after the pre-install review correction. New tests cover production policy refusal,
   Codex and ChatGPT identities, modern Codex executable naming, private candidate
   rendering and drift, crash read budget, malformed prior plist, and maintenance
   refusal before executable replacement.
 - Worker: 15 tests passed. No Worker source or deployed service changed.
-- Apple Bash 3.2: 121 shell cases passed, 0 failed, with executable source held
-  stable. Shell syntax and whitespace checks pass. New shell regressions cover
+- Apple Bash 3.2: 121 shell cases passed, 0 failed, on baseline `7151a7d` with
+  executable source stable. After the installer-only handoff correction, all 8
+  focused installer shell cases pass; the shell recovery code is unchanged.
+  Shell syntax and whitespace checks pass. New shell regressions cover
   quit-marker priority, dangling disable, Grok absent-versus-crash evidence and a
   desktop pause arriving after restart authorization.
 - The private candidate was prepared and checked against the real prior installed
@@ -47,3 +49,14 @@ An absent process or synthetic report is not silent-disconnect proof. The option
 beacon remains the existing supported inbox and has not been activated or called.
 An owner-approved maintenance window, protected work, exact-head review and
 separate bounded live-proof authorization remain necessary before runtime action.
+
+
+## Subsequent owner approval and pre-install review
+
+The owner approved local installation and a bounded recovery test after active
+work is checkpointed/parked, followed by technical review before merge. The parent
+is coordinating that quiet boundary; no runtime action has yet occurred. The
+[pre-install technical review](TECHNICAL-REVIEW-2026-10-20.md) corrected an already-
+unloaded watchdog handoff conflict. This pass is by the implementing agent, not
+independent reviewer clearance, and does not replace post-test review. Exact
+process identities, signed candidate and bounded proof plan are private.
